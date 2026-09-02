@@ -1,0 +1,1 @@
+{"event":"result","result":{"conversation_id":"823fb330-71e5-43b9-9efd-d9b7323e4b94","status":"ERROR","response":"","error":"turn execution failed: process terminated","duration_seconds":0.5,"num_turns":1,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}
