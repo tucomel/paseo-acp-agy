@@ -16,6 +16,10 @@ import {
   AgyResultEvent,
 } from "./protocol.js";
 import { SessionManager, Session } from "./session.js";
+import {
+  executeSlashCommand,
+  AVAILABLE_SLASH_COMMANDS,
+} from "./slash-commands.js";
 
 export class ACPServer {
   private sessionManager: SessionManager;
@@ -175,7 +179,7 @@ export class ACPServer {
             binaryPath: this.binaryPath,
           });
 
-          const availableModels = await fetchAvailableModels(this.binaryPath);
+          const availableModels = await fetchAvailableModels(this.binaryPath, true);
           const configOptions = buildConfigOptionsForModel(
             session.model,
             session.effort,
@@ -194,6 +198,13 @@ export class ACPServer {
                 currentModelId: session.model,
               },
               configOptions,
+            });
+            this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+              sessionId: session.id,
+              update: {
+                sessionUpdate: "available_commands_update",
+                availableCommands: AVAILABLE_SLASH_COMMANDS,
+              },
             });
           }
           break;
@@ -234,6 +245,13 @@ export class ACPServer {
               },
               configOptions,
             });
+            this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+              sessionId: session.id,
+              update: {
+                sessionUpdate: "available_commands_update",
+                availableCommands: AVAILABLE_SLASH_COMMANDS,
+              },
+            });
           }
           break;
         }
@@ -260,6 +278,27 @@ export class ACPServer {
             model: session.model,
             effort: session.effort,
           });
+
+          // Check if this is an intercepted slash command (e.g. /resume, /usage, /help)
+          const slashResult = await executeSlashCommand(promptText, session, this.binaryPath);
+          if (slashResult.handled) {
+            if (slashResult.response) {
+              this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                sessionId: session.id,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: slashResult.response,
+                  },
+                },
+              });
+            }
+            if (!isNotification) {
+              this.sendSuccess(id, { stopReason: "end_turn" });
+            }
+            return;
+          }
 
           const onStepUpdate = (event: AgyStepUpdateEvent) => {
             const step = event.step_update;

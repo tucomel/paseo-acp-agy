@@ -104,6 +104,13 @@ export class AntigravityProcess extends EventEmitter {
     }
   }
 
+  setConversationId(conversationId: string) {
+    if (this.conversationId !== conversationId) {
+      this.conversationId = conversationId;
+      this.reconfigureOrScheduleRestart();
+    }
+  }
+
   private reconfigureOrScheduleRestart() {
     if (!this.isRunning) {
       return;

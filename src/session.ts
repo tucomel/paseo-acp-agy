@@ -67,6 +67,10 @@ export class Session {
     this.process.setMode(mode);
   }
 
+  setConversationId(conversationId: string) {
+    this.process.setConversationId(conversationId);
+  }
+
   touch() {
     this.lastActivity = new Date();
   }
