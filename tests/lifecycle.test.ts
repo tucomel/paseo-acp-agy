@@ -40,6 +40,16 @@ describe("ACP Session Lifecycle & Isolation", () => {
     clientInput.write(JSON.stringify(msg) + "\n");
   }
 
+  async function waitForResponse(id: number, timeoutMs = 2000): Promise<any> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const res = responses.find((r) => r.id === id);
+      if (res) return res;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`Timeout waiting for RPC response id=${id}`);
+  }
+
   it("should isolate multiple sessions independently", async () => {
     sendRpc({
       jsonrpc: "2.0",
@@ -55,10 +65,8 @@ describe("ACP Session Lifecycle & Isolation", () => {
       params: { cwd: "/tmp/workspace-b", model: "claude-sonnet-4-6" },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    const res1 = responses.find((r) => r.id === 1);
-    const res2 = responses.find((r) => r.id === 2);
+    const res1 = await waitForResponse(1);
+    const res2 = await waitForResponse(2);
 
     expect(res1).toBeDefined();
     expect(res2).toBeDefined();
@@ -68,13 +76,15 @@ describe("ACP Session Lifecycle & Isolation", () => {
     const sessionB = sessionManager.getSession(res2.result.sessionId);
 
     expect(sessionA?.cwd).toBe("/tmp/workspace-a");
-    expect(sessionA?.model).toBe("gemini-3.7-flash-high");
+    expect(sessionA?.model).toBe("gemini-3.7-flash");
+    expect(sessionA?.effort).toBe("high");
 
     expect(sessionB?.cwd).toBe("/tmp/workspace-b");
     expect(sessionB?.model).toBe("claude-sonnet-4-6");
+    expect(sessionB?.effort).toBe("high");
   });
 
-  it("should support set_mode and set_model", async () => {
+  it("should support set_mode, set_model, and set_config_option (thought_level) and update process", async () => {
     const session = sessionManager.createSession({ cwd: "/tmp" });
 
     sendRpc({
@@ -88,13 +98,41 @@ describe("ACP Session Lifecycle & Isolation", () => {
       jsonrpc: "2.0",
       id: 4,
       method: "session/set_model",
-      params: { sessionId: session.id, modelId: "gemini-3.1-pro-high" },
+      params: { sessionId: session.id, modelId: "gemini-3.7-flash" },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    sendRpc({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/set_config_option",
+      params: { sessionId: session.id, configId: "thought_level", value: "low" },
+    });
+
+    const res3 = await waitForResponse(3);
+    const res4 = await waitForResponse(4);
+    const res5 = await waitForResponse(5);
+
+    expect(res3).toBeDefined();
+    expect(res4).toBeDefined();
+    expect(res5).toBeDefined();
 
     expect(session.mode).toBe("plan");
-    expect(session.model).toBe("gemini-3.1-pro-high");
+    expect(session.model).toBe("gemini-3.7-flash");
+    expect(session.effort).toBe("low");
+
+    expect(session.process.currentMode).toBe("plan");
+    expect(session.process.currentModel).toBe("gemini-3.7-flash");
+    expect(session.process.currentEffort).toBe("low");
+
+    expect(res5.result.configOptions).toBeDefined();
+    expect(res5.result.configOptions[0].currentValue).toBe("low");
+  });
+
+  it("should safely handle process errors without throwing unhandled exceptions", () => {
+    const session = sessionManager.createSession({ cwd: "/tmp" });
+    expect(() => {
+      session.process.emit("error", new Error("Simulated subprocess failure"));
+    }).not.toThrow();
   });
 
   it("should close session and cleanup process on session/close", async () => {
@@ -103,12 +141,12 @@ describe("ACP Session Lifecycle & Isolation", () => {
 
     sendRpc({
       jsonrpc: "2.0",
-      id: 5,
+      id: 6,
       method: "session/close",
       params: { sessionId: session.id },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForResponse(6);
 
     expect(closeSpy).toHaveBeenCalled();
     expect(sessionManager.getSession(session.id)).toBeUndefined();

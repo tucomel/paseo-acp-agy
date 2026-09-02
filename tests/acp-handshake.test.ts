@@ -38,6 +38,16 @@ describe("ACP Handshake & Protocol", () => {
     clientInput.write(JSON.stringify(msg) + "\n");
   }
 
+  async function waitForResponse(id: number, timeoutMs = 2000): Promise<any> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const res = responses.find((r) => r.id === id);
+      if (res) return res;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`Timeout waiting for RPC response id=${id}`);
+  }
+
   it("should respond to initialize with server capabilities and info", async () => {
     sendRpc({
       jsonrpc: "2.0",
@@ -49,15 +59,14 @@ describe("ACP Handshake & Protocol", () => {
       },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    expect(responses.length).toBe(1);
-    const res = responses[0];
+    const res = await waitForResponse(1);
     expect(res.id).toBe(1);
     expect(res.jsonrpc).toBe("2.0");
     expect(res.result.serverInfo.name).toBe("agy-acp");
     expect(res.result.serverInfo.version).toBe("1.0.0");
     expect(res.result.protocolVersion).toBe("1.0.0");
+    expect(res.result.agentCapabilities.loadSession).toBe(true);
+    expect(res.result.agentCapabilities.sessionCapabilities.resume).toBe(true);
   });
 
   it("should respond to session/new with new session ID and available modes/models", async () => {
@@ -71,14 +80,13 @@ describe("ACP Handshake & Protocol", () => {
       },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    expect(responses.length).toBe(1);
-    const res = responses[0];
+    const res = await waitForResponse(2);
     expect(res.id).toBe(2);
     expect(res.result.sessionId).toBeDefined();
     expect(res.result.modes.availableModes.length).toBeGreaterThan(0);
     expect(res.result.models.availableModels.length).toBeGreaterThan(0);
+    expect(res.result.configOptions).toBeDefined();
+    expect(res.result.configOptions[0].category).toBe("thought_level");
   });
 
   it("should return method not found for unknown methods", async () => {
@@ -89,10 +97,7 @@ describe("ACP Handshake & Protocol", () => {
       params: {},
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    expect(responses.length).toBe(1);
-    const res = responses[0];
+    const res = await waitForResponse(99);
     expect(res.id).toBe(99);
     expect(res.error).toBeDefined();
     expect(res.error.code).toBe(-32601);

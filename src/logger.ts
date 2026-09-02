@@ -27,12 +27,20 @@ function resolveLogLevel(): LogLevel {
   return "info";
 }
 
-function sanitize(data: unknown): unknown {
+export function sanitizeString(str: string): string {
+  return str
+    .replace(/(Bearer\s+)[a-zA-Z0-9_\-\.]{8,}/gi, "$1[REDACTED]")
+    .replace(
+      /(token|key|secret|password|auth|authorization|api[_-]?key)(\s*[:=]\s*['"]?)[a-zA-Z0-9_\-\.]{6,}(['"]?)/gi,
+      "$1$2[REDACTED]$3"
+    )
+    .replace(/AIza[0-9A-Za-z-_]{35}/g, "[REDACTED_API_KEY]")
+    .replace(/ya29\.[0-9A-Za-z-_]+/g, "[REDACTED_OAUTH_TOKEN]");
+}
+
+export function sanitize(data: unknown): unknown {
   if (typeof data === "string") {
-    // Redact potential tokens, bearer tokens, or keys
-    return data
-      .replace(/(?:Bearer|token|key|secret|password|authorization)\s*[:=]\s*['"]?([a-zA-Z0-9_\-\.]{8,})['"]?/gi, "$1=[REDACTED]")
-      .replace(/AIza[0-9A-Za-z-_]{35}/g, "[REDACTED_API_KEY]");
+    return sanitizeString(data);
   }
   if (data && typeof data === "object") {
     if (Array.isArray(data)) {
@@ -40,8 +48,8 @@ function sanitize(data: unknown): unknown {
     }
     const clean: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(data)) {
-      if (/token|secret|password|auth|cookie|credential/i.test(k)) {
-        clean[k] = "[REDACTED]";
+      if (/token|secret|password|cookie|credential|authorization|api[_-]?key/i.test(k)) {
+        clean[k] = typeof v === "object" && v !== null ? sanitize(v) : "[REDACTED]";
       } else {
         clean[k] = sanitize(v);
       }
@@ -52,7 +60,7 @@ function sanitize(data: unknown): unknown {
 }
 
 export class Logger {
-  private logFilePath: string;
+  public logFilePath: string;
   private minLevel: LogLevel;
   private writeStream: fs.WriteStream | null = null;
 
@@ -60,13 +68,24 @@ export class Logger {
     this.minLevel = options?.minLevel || resolveLogLevel();
     const dir = options?.logDir || getLogDir();
     try {
-      fs.mkdirSync(dir, { recursive: true });
-    } catch {
-      // Ignore directory creation error
-    }
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      try {
+        fs.chmodSync(dir, 0o700);
+      } catch {}
+    } catch {}
+
     this.logFilePath = path.join(dir, "agy-acp.log");
     try {
-      this.writeStream = fs.createWriteStream(this.logFilePath, { flags: "a" });
+      // Ensure file exists with 0600 mode
+      if (!fs.existsSync(this.logFilePath)) {
+        fs.writeFileSync(this.logFilePath, "", { mode: 0o600 });
+      } else {
+        try {
+          fs.chmodSync(this.logFilePath, 0o600);
+        } catch {}
+      }
+      this.writeStream = fs.createWriteStream(this.logFilePath, { flags: "a", mode: 0o600 });
+      this.writeStream.on("error", () => {});
     } catch {
       this.writeStream = null;
     }
@@ -82,7 +101,7 @@ export class Logger {
     const entry = {
       timestamp,
       level,
-      message,
+      message: sanitizeString(message),
       ...(sanitizedMeta !== undefined ? { data: sanitizedMeta } : {}),
     };
 
@@ -91,9 +110,12 @@ export class Logger {
       this.writeStream.write(line);
     }
 
-    // Optional stderr debug logging if specifically enabled, NEVER stdout
     if (process.env.AGY_ACP_STDERR_LOG === "true" || process.env.AGY_ACP_STDERR_LOG === "1") {
-      process.stderr.write(`[agy-acp] ${timestamp} [${level.toUpperCase()}] ${message} ${meta ? JSON.stringify(sanitizedMeta) : ""}\n`);
+      process.stderr.write(
+        `[agy-acp] ${timestamp} [${level.toUpperCase()}] ${entry.message} ${
+          meta ? JSON.stringify(sanitizedMeta) : ""
+        }\n`
+      );
     }
   }
 

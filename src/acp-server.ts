@@ -7,8 +7,9 @@ import {
   JsonRpcSuccessResponse,
   JsonRpcErrorResponse,
   ACP_METHODS,
-  AVAILABLE_MODELS,
   AVAILABLE_MODES,
+  fetchAvailableModels,
+  buildConfigOptionsForModel,
   extractPromptText,
   mapToolNameToKind,
   AgyStepUpdateEvent,
@@ -20,6 +21,7 @@ export class ACPServer {
   private sessionManager: SessionManager;
   private input: Readable;
   private output: Writable;
+  private binaryPath: string;
   private rl: readline.Interface | null = null;
   private isRunning: boolean = false;
 
@@ -27,10 +29,13 @@ export class ACPServer {
     input?: Readable;
     output?: Writable;
     sessionManager?: SessionManager;
+    binaryPath?: string;
   } = {}) {
     this.input = options.input || process.stdin;
     this.output = options.output || process.stdout;
-    this.sessionManager = options.sessionManager || new SessionManager();
+    this.binaryPath = options.binaryPath || process.env.AGY_BIN_PATH || "agy";
+    this.sessionManager =
+      options.sessionManager || new SessionManager({ defaultBinaryPath: this.binaryPath });
   }
 
   start() {
@@ -132,8 +137,10 @@ export class ACPServer {
                 version: "1.0.0",
               },
               agentCapabilities: {
-                loadSession: false,
-                sessionCapabilities: {},
+                loadSession: true,
+                sessionCapabilities: {
+                  resume: true,
+                },
               },
             });
           }
@@ -143,10 +150,37 @@ export class ACPServer {
         case ACP_METHODS.SESSION_NEW:
         case ACP_METHODS.SESSION_NEW_ALIAS: {
           const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
-          const model = typeof params.model === "string" ? params.model : undefined;
+          let model = typeof params.model === "string" ? params.model : undefined;
+          let effort: string | undefined = undefined;
           const mode = typeof params.mode === "string" ? params.mode : undefined;
 
-          const session = this.sessionManager.createSession({ cwd, model, mode });
+          if (model) {
+            if (model.endsWith("-high")) {
+              effort = "high";
+              model = model.slice(0, -5);
+            } else if (model.endsWith("-medium")) {
+              effort = "medium";
+              model = model.slice(0, -7);
+            } else if (model.endsWith("-low")) {
+              effort = "low";
+              model = model.slice(0, -4);
+            }
+          }
+
+          const session = this.sessionManager.createSession({
+            cwd,
+            model,
+            effort,
+            mode,
+            binaryPath: this.binaryPath,
+          });
+
+          const availableModels = await fetchAvailableModels(this.binaryPath);
+          const configOptions = buildConfigOptionsForModel(
+            session.model,
+            session.effort,
+            availableModels
+          );
 
           if (!isNotification) {
             this.sendSuccess(id, {
@@ -156,9 +190,49 @@ export class ACPServer {
                 currentModeId: session.mode,
               },
               models: {
-                availableModels: AVAILABLE_MODELS,
+                availableModels,
                 currentModelId: session.model,
               },
+              configOptions,
+            });
+          }
+          break;
+        }
+
+        case ACP_METHODS.SESSION_LOAD:
+        case ACP_METHODS.SESSION_LOAD_ALIAS:
+        case ACP_METHODS.SESSION_RESUME:
+        case ACP_METHODS.SESSION_RESUME_ALIAS: {
+          const sessionId = String(params.sessionId || "");
+          const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
+          let session = this.sessionManager.getSession(sessionId);
+          if (!session) {
+            session = this.sessionManager.createSession({
+              id: sessionId,
+              cwd,
+              binaryPath: this.binaryPath,
+            });
+          }
+
+          const availableModels = await fetchAvailableModels(this.binaryPath);
+          const configOptions = buildConfigOptionsForModel(
+            session.model,
+            session.effort,
+            availableModels
+          );
+
+          if (!isNotification) {
+            this.sendSuccess(id, {
+              sessionId: session.id,
+              modes: {
+                availableModes: AVAILABLE_MODES,
+                currentModeId: session.mode,
+              },
+              models: {
+                availableModels,
+                currentModelId: session.model,
+              },
+              configOptions,
             });
           }
           break;
@@ -177,9 +251,15 @@ export class ACPServer {
           }
 
           session.touch();
+          session.isCancelled = false;
           const promptText = extractPromptText(params.prompt);
 
-          logger.info("Processing ACP prompt", { sessionId, promptLength: promptText.length });
+          logger.info("Processing ACP prompt", {
+            sessionId,
+            promptLength: promptText.length,
+            model: session.model,
+            effort: session.effort,
+          });
 
           const onStepUpdate = (event: AgyStepUpdateEvent) => {
             const step = event.step_update;
@@ -271,20 +351,52 @@ export class ACPServer {
               onStepUpdate
             );
 
-            const status = resultEvent.result?.status;
-            const stopReason = status === "SUCCESS" ? "end_turn" : "cancelled";
-
-            if (!isNotification) {
-              this.sendSuccess(id, {
-                stopReason,
+            if (session.isCancelled) {
+              if (!isNotification) {
+                this.sendSuccess(id, { stopReason: "cancelled" });
+              }
+            } else if (resultEvent.result?.status === "ERROR") {
+              const errorMessage = resultEvent.result.error || "Turn failed with an error";
+              logger.error("Turn result reported error", { error: errorMessage, sessionId });
+              this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                sessionId: session.id,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: `\n\n**Error:** ${errorMessage}\n`,
+                  },
+                },
               });
+              if (!isNotification) {
+                this.sendSuccess(id, { stopReason: "refusal" });
+              }
+            } else {
+              if (!isNotification) {
+                this.sendSuccess(id, { stopReason: "end_turn" });
+              }
             }
           } catch (promptErr) {
-            logger.error("Error executing prompt turn", { error: (promptErr as Error).message });
-            if (!isNotification) {
-              this.sendSuccess(id, {
-                stopReason: "cancelled",
+            if (session.isCancelled) {
+              if (!isNotification) {
+                this.sendSuccess(id, { stopReason: "cancelled" });
+              }
+            } else {
+              const errorMsg = (promptErr as Error).message || "Turn execution failed";
+              logger.error("Error executing prompt turn", { error: errorMsg, sessionId });
+              this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                sessionId: session.id,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: `\n\n**Error:** ${errorMsg}\n`,
+                  },
+                },
               });
+              if (!isNotification) {
+                this.sendSuccess(id, { stopReason: "refusal" });
+              }
             }
           }
           break;
@@ -296,7 +408,7 @@ export class ACPServer {
           const session = this.sessionManager.getSession(sessionId);
           if (session) {
             logger.info("Cancelling session prompt", { sessionId });
-            session.process.cancelCurrentTurn();
+            session.cancelTurn();
           }
           if (!isNotification) {
             this.sendSuccess(id, {});
@@ -320,7 +432,7 @@ export class ACPServer {
           const modeId = String(params.modeId || params.mode || "default");
           const session = this.sessionManager.getSession(sessionId);
           if (session) {
-            session.mode = modeId;
+            session.setMode(modeId);
           }
           if (!isNotification) {
             this.sendSuccess(id, {});
@@ -331,13 +443,63 @@ export class ACPServer {
         case ACP_METHODS.SESSION_SET_MODEL:
         case ACP_METHODS.SESSION_SET_MODEL_ALIAS: {
           const sessionId = String(params.sessionId || "");
-          const modelId = String(params.modelId || params.model || "");
+          let modelId = String(params.modelId || params.model || "");
           const session = this.sessionManager.getSession(sessionId);
           if (session && modelId) {
-            session.model = modelId;
+            if (modelId.endsWith("-high")) {
+              session.setEffort("high");
+              modelId = modelId.slice(0, -5);
+            } else if (modelId.endsWith("-medium")) {
+              session.setEffort("medium");
+              modelId = modelId.slice(0, -7);
+            } else if (modelId.endsWith("-low")) {
+              session.setEffort("low");
+              modelId = modelId.slice(0, -4);
+            }
+            session.setModel(modelId);
           }
+          const availableModels = await fetchAvailableModels(this.binaryPath);
+          const configOptions = buildConfigOptionsForModel(
+            session ? session.model : modelId,
+            session ? session.effort : "high",
+            availableModels
+          );
           if (!isNotification) {
-            this.sendSuccess(id, {});
+            this.sendSuccess(id, {
+              configOptions,
+            });
+          }
+          break;
+        }
+
+        case ACP_METHODS.SESSION_SET_CONFIG_OPTION:
+        case ACP_METHODS.SESSION_SET_CONFIG_OPTION_ALIAS: {
+          const sessionId = String(params.sessionId || "");
+          const configId = String(params.configId || "");
+          const value = String(params.value || "");
+          const session = this.sessionManager.getSession(sessionId);
+
+          if (session) {
+            if (configId === "thought_level" || configId === "effort") {
+              session.setEffort(value);
+              logger.info("Updated reasoning effort for session", { sessionId, effort: value });
+            } else if (configId === "model") {
+              session.setModel(value);
+              logger.info("Updated model for session via config option", { sessionId, model: value });
+            }
+          }
+
+          const availableModels = await fetchAvailableModels(this.binaryPath);
+          const configOptions = buildConfigOptionsForModel(
+            session ? session.model : "gemini-3.7-flash",
+            session ? session.effort : "high",
+            availableModels
+          );
+
+          if (!isNotification) {
+            this.sendSuccess(id, {
+              configOptions,
+            });
           }
           break;
         }

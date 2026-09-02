@@ -7,6 +7,7 @@ import {
   AgyStepUpdateEvent,
   AgyResultEvent,
   AgyStreamInputUserMessage,
+  getEffectiveEffortForModel,
 } from "./protocol.js";
 import { buildAgyArgs, PermissionSettings } from "./permissions.js";
 
@@ -14,6 +15,7 @@ export interface AntigravityProcessOptions {
   binaryPath?: string;
   cwd?: string;
   model?: string;
+  effort?: string;
   mode?: string;
   conversationId?: string;
   permissions?: PermissionSettings;
@@ -25,6 +27,7 @@ export class AntigravityProcess extends EventEmitter {
   private binaryPath: string;
   private cwd: string;
   private model?: string;
+  private effort?: string;
   private mode?: string;
   private conversationId?: string;
   private permissions: PermissionSettings;
@@ -32,6 +35,7 @@ export class AntigravityProcess extends EventEmitter {
   private stdoutBuffer: string = "";
   private stderrBuffer: string = "";
   private isClosed: boolean = false;
+  private needsRestart: boolean = false;
   private currentTurnPromise: {
     resolve: (result: AgyResultEvent) => void;
     reject: (err: Error) => void;
@@ -41,10 +45,14 @@ export class AntigravityProcess extends EventEmitter {
 
   constructor(options: AntigravityProcessOptions = {}) {
     super();
-    this.binaryPath =
-      options.binaryPath || process.env.AGY_BIN_PATH || "/home/ubuntu/.local/bin/agy";
+    this.on("error", (err) => {
+      logger.error("AntigravityProcess internal error event", { error: err.message });
+    });
+
+    this.binaryPath = options.binaryPath || process.env.AGY_BIN_PATH || "agy";
     this.cwd = options.cwd || process.cwd();
     this.model = options.model;
+    this.effort = options.effort;
     this.mode = options.mode;
     this.conversationId = options.conversationId;
     this.permissions = options.permissions || { sandbox: false, dangerouslySkipPermissions: false };
@@ -55,8 +63,78 @@ export class AntigravityProcess extends EventEmitter {
     return this.child !== null && !this.child.killed && this.child.exitCode === null;
   }
 
+  get isExecutingTurn(): boolean {
+    return this.currentTurnPromise !== null;
+  }
+
   get currentConversationId(): string | undefined {
     return this.conversationId;
+  }
+
+  get currentModel(): string | undefined {
+    return this.model;
+  }
+
+  get currentEffort(): string | undefined {
+    return this.effort;
+  }
+
+  get currentMode(): string | undefined {
+    return this.mode;
+  }
+
+  setModel(model: string) {
+    if (this.model !== model) {
+      this.model = model;
+      this.reconfigureOrScheduleRestart();
+    }
+  }
+
+  setEffort(effort: string) {
+    if (this.effort !== effort) {
+      this.effort = effort;
+      this.reconfigureOrScheduleRestart();
+    }
+  }
+
+  setMode(mode: string) {
+    if (this.mode !== mode) {
+      this.mode = mode;
+      this.reconfigureOrScheduleRestart();
+    }
+  }
+
+  private reconfigureOrScheduleRestart() {
+    if (!this.isRunning) {
+      return;
+    }
+    if (this.isExecutingTurn) {
+      this.needsRestart = true;
+    } else {
+      logger.info("Reconfiguring agy process with new settings (model/effort/mode)", {
+        model: this.model,
+        effort: this.effort,
+        mode: this.mode,
+        conversationId: this.conversationId,
+      });
+      this.killChildGracefully();
+    }
+  }
+
+  private killChildGracefully() {
+    if (this.child) {
+      try {
+        if (this.child.stdin && !this.child.stdin.destroyed) {
+          this.child.stdin.end();
+        }
+        if (this.isRunning) {
+          this.child.kill("SIGTERM");
+        }
+      } catch {
+        // ignore kill errors
+      }
+      this.child = null;
+    }
   }
 
   async start(): Promise<void> {
@@ -68,6 +146,12 @@ export class AntigravityProcess extends EventEmitter {
     if (this.model) {
       extraArgs.push("--model", this.model);
     }
+
+    const effectiveEffort = getEffectiveEffortForModel(this.model, this.effort);
+    if (effectiveEffort) {
+      extraArgs.push("--effort", effectiveEffort);
+    }
+
     if (this.conversationId) {
       extraArgs.push("--conversation", this.conversationId);
     }
@@ -85,13 +169,19 @@ export class AntigravityProcess extends EventEmitter {
       binary: this.binaryPath,
       args,
       cwd: this.cwd,
+      effectiveEffort,
     });
 
-    this.child = spawn(this.binaryPath, args, {
-      cwd: this.cwd,
-      env: this.env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    try {
+      this.child = spawn(this.binaryPath, args, {
+        cwd: this.cwd,
+        env: this.env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (spawnErr) {
+      logger.error("Failed to spawn agy process", { error: (spawnErr as Error).message });
+      throw spawnErr;
+    }
 
     if (!this.child.stdin || !this.child.stdout || !this.child.stderr) {
       throw new Error("Failed to create stdio pipes for agy process");
@@ -116,12 +206,12 @@ export class AntigravityProcess extends EventEmitter {
     });
 
     this.child.on("error", (err: Error) => {
-      logger.error("agy process error", { error: err.message });
+      logger.error("agy child process emitted error", { error: err.message });
       if (this.currentTurnPromise) {
         this.currentTurnPromise.reject(err);
         this.currentTurnPromise = null;
       }
-      this.emit("error", err);
+      this.emit("process_error", err);
     });
 
     this.child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
@@ -209,6 +299,11 @@ export class AntigravityProcess extends EventEmitter {
     text: string,
     onStepUpdate?: (event: AgyStepUpdateEvent) => void
   ): Promise<AgyResultEvent> {
+    if (this.needsRestart && this.isRunning) {
+      this.needsRestart = false;
+      this.killChildGracefully();
+    }
+
     if (!this.isRunning) {
       await this.start();
     }
@@ -300,7 +395,6 @@ export class AntigravityProcess extends EventEmitter {
         }
         if (this.isRunning) {
           this.child.kill("SIGTERM");
-          // Give process 2 seconds to exit gracefully, then SIGKILL
           setTimeout(() => {
             if (this.isRunning) {
               this.child?.kill("SIGKILL");

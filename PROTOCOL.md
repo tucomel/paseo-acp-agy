@@ -11,9 +11,9 @@ agy --input-format stream-json --output-format stream-json --print=""
 ```
 Optional flags supported:
 - `--cwd <path>` / `--add-dir <dir>`: session workspace root
-- `--model <model-id>`: model selection (e.g. `gemini-3.7-flash-high`, `gemini-3.7-flash-medium`, `gemini-3.6-flash-high`, `gemini-3.1-pro-high`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`)
+- `--model <model-id>`: base model selection (e.g. `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.1-pro`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`)
+- `--effort <low|medium|high>`: reasoning effort / thinking level
 - `--mode <mode-id>`: execution mode (e.g. `accept-edits`, `plan`)
-- `--effort <low|medium|high>`: reasoning effort
 - `--conversation <id>`: resume previous conversation ID
 - `--sandbox`: run with terminal restrictions enabled
 - `--dangerously-skip-permissions`: bypass permission prompts (disabled by default)
@@ -55,7 +55,7 @@ Multiple turns can be sent sequentially on the same open stdin stream.
     "cwd": "/home/ubuntu/projects/eo",
     "tools": ["view_file", "run_command", "replace_file_content", ...],
     "permission_mode": "request-review",
-    "model": "gemini-3.7-flash-high"
+    "model": "gemini-3.7-flash"
   }
 }
 ```
@@ -86,28 +86,7 @@ Multiple turns can be sent sequentially on the same open stdin stream.
     }
   }
   ```
-  And when completed:
-  ```json
-  {
-    "event": "step_update",
-    "step_update": {
-      "conversation_id": "...",
-      "step_index": 1,
-      "state": "DONE",
-      "step_type": "agent_response",
-      "text_delta": " you today?\n",
-      "duration_seconds": 1.37,
-      "usage": {
-        "input_tokens": 13842,
-        "output_tokens": 35,
-        "thinking_tokens": 26,
-        "cache_read_tokens": 0,
-        "total_tokens": 13877
-      }
-    }
-  }
-  ```
-- **Tool invocation**:
+- **Tool invocation & result**:
   ```json
   {
     "event": "step_update",
@@ -120,47 +99,6 @@ Multiple turns can be sent sequentially on the same open stdin stream.
       "tool_info": {
         "name": "view_file",
         "parameters": { "AbsolutePath": "/home/ubuntu/projects/eo/README.md" }
-      }
-    }
-  }
-  ```
-  Tool completion:
-  ```json
-  {
-    "event": "step_update",
-    "step_update": {
-      "conversation_id": "...",
-      "step_index": 2,
-      "state": "DONE",
-      "step_type": "tool",
-      "tool_name": "view_file",
-      "duration_seconds": 0.027,
-      "tool_info": {
-        "name": "view_file",
-        "parameters": { "AbsolutePath": "/home/ubuntu/projects/eo/README.md" },
-        "output": "90 lines, 3065 bytes"
-      }
-    }
-  }
-  ```
-- **Tool error**:
-  ```json
-  {
-    "event": "step_update",
-    "step_update": {
-      "conversation_id": "...",
-      "step_index": 4,
-      "state": "ERROR",
-      "step_type": "tool",
-      "tool_name": "run_command",
-      "duration_seconds": 0.02,
-      "tool_info": {
-        "name": "run_command",
-        "parameters": { "CommandLine": "pwd" },
-        "error": {
-          "type": "TOOL_ERROR",
-          "message": "permission check failed for command \"pwd\": user denied permission to run command:\npwd"
-        }
       }
     }
   }
@@ -189,34 +127,32 @@ Multiple turns can be sent sequentially on the same open stdin stream.
 
 ---
 
-## 2. ACP Protocol Mapping
+## 2. ACP Protocol Mapping & Combobox Separation
+
+### Separation of Model & Thinking Effort (Comboboxes)
+In ACP, Paseo separates the model selection from the thinking/reasoning effort:
+- **Models (`models` / `setSessionModel`)**:
+  - `gemini-3.7-flash` (Gemini 3.7 Flash)
+  - `gemini-3.6-flash` (Gemini 3.6 Flash)
+  - `gemini-3.1-pro` (Gemini 3.1 Pro)
+  - `claude-sonnet-4-6` (Claude Sonnet 4.6)
+  - `claude-opus-4-6-thinking` (Claude Opus 4.6)
+  - `gpt-oss-120b-medium` (GPT-OSS 120B)
+- **Thinking Option (`configOptions` / `setSessionConfigOption` with `category: "thought_level"`)**:
+  - `low` (Low reasoning effort)
+  - `medium` (Medium reasoning effort)
+  - `high` (High reasoning effort)
+
+When configured in Paseo (CLI `--model <model> --thinking <effort>` or in UI dropdowns), Paseo calls `setSessionModel` and `setSessionConfigOption`, and `agy-acp` applies `--model <model>` and `--effort <effort>` to the `agy` process.
 
 | ACP (Paseo) | `agy-acp` Action | Antigravity `agy` stream-json |
 |---|---|---|
-| `initialize` | Return capabilities, server info, supported models/modes | Probe `/home/ubuntu/.local/bin/agy --version` |
-| `session/new` | Create session state, allocate sessionId | Spawn dedicated `agy` persistent process with configured cwd/model/mode |
-| `session/prompt` | Send prompt turn, await turn completion | Write `{"event": "user", "message": {"content": prompt}}` to `agy` stdin |
-| `session/update` notification | Send streaming chunks to client | Translate `step_update` (text_delta, tool_info, usage) to ACP `agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update` |
-| `session/cancel` notification | Cancel active turn | Send `SIGINT` to the active `agy` process for clean turn abortion |
-| `session/close` | Free session resources | Close `agy` stdin, terminate process cleanly |
-| `session/set_mode` | Change mode (`accept-edits` vs `plan`) | Track in session; apply on session turns |
-| `session/set_model` | Change active model | Track in session; applied to process |
-
-### Tool Kind Mapping
-
-| `agy` Tool Name | ACP `ToolKind` |
-|---|---|
-| `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_url_content`, `read_resource` | `read` |
-| `replace_file_content`, `write_to_file`, `multi_replace_file_content`, `sed_file` | `edit` |
-| `run_command`, `send_command_input`, `command_status` | `execute` |
-| `search_web`, `read_url_content` | `fetch` |
-| Other tools (`browser_*`, `notebook_*`, `schedule`, etc.) | `other` |
-
----
-
-## 3. Session Isolation & Process Architecture
-
-- **1 Paseo Session = 1 Dedicated Persistent `agy` Process**.
-- Sessions are completely isolated in their own processes with distinct working directories and conversation contexts.
-- Multi-turn prompts maintain conversational context natively inside the `agy` process.
-- Process crashes or turn timeouts are contained per session and do not compromise the adapter or Paseo daemon.
+| `initialize` | Return capabilities, server info | Probe `agy --version` |
+| `session/new` | Create session state, return `models`, `modes`, and `configOptions` | Spawn dedicated `agy` process with `--model` and `--effort` |
+| `session/set_model` | Set active base model | Pass `--model <model>` |
+| `session/set_config_option` (`thought_level`) | Set reasoning effort (`low`, `medium`, `high`) | Pass `--effort <effort>` |
+| `session/set_mode` | Change mode (`accept-edits` vs `plan`) | Pass `--mode <mode>` |
+| `session/prompt` | Send prompt turn, await turn completion | Write NDJSON `{"event": "user", "message": {"content": prompt}}` |
+| `session/update` notification | Send streaming chunks | Translate `step_update` (text_delta, thought, tool) to ACP update notifications |
+| `session/cancel` notification | Cancel active turn | Send `SIGINT` to the active `agy` process |
+| `session/close` | Free session resources | Terminate process cleanly |

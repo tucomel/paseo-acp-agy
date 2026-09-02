@@ -7,6 +7,7 @@ export interface SessionOptions {
   id?: string;
   cwd?: string;
   model?: string;
+  effort?: string;
   mode?: string;
   sandbox?: boolean;
   dangerouslySkipPermissions?: boolean;
@@ -18,15 +19,18 @@ export class Session {
   public readonly id: string;
   public cwd: string;
   public model: string;
+  public effort: string;
   public mode: string;
   public readonly createdAt: Date;
   public lastActivity: Date;
+  public isCancelled: boolean = false;
   public process: AntigravityProcess;
 
   constructor(options: SessionOptions = {}) {
     this.id = options.id || crypto.randomUUID();
     this.cwd = options.cwd || process.cwd();
-    this.model = options.model || "gemini-3.7-flash-high";
+    this.model = options.model || "gemini-3.7-flash";
+    this.effort = options.effort || "high";
     this.mode = options.mode || "default";
     this.createdAt = new Date();
     this.lastActivity = new Date();
@@ -41,14 +45,35 @@ export class Session {
       binaryPath: options.binaryPath,
       cwd: this.cwd,
       model: this.model,
+      effort: this.effort,
       mode: this.mode,
       permissions,
       env: options.env,
     });
   }
 
+  setModel(model: string) {
+    this.model = model;
+    this.process.setModel(model);
+  }
+
+  setEffort(effort: string) {
+    this.effort = effort;
+    this.process.setEffort(effort);
+  }
+
+  setMode(mode: string) {
+    this.mode = mode;
+    this.process.setMode(mode);
+  }
+
   touch() {
     this.lastActivity = new Date();
+  }
+
+  cancelTurn(): boolean {
+    this.isCancelled = true;
+    return this.process.cancelCurrentTurn();
   }
 
   async close(): Promise<void> {
@@ -59,11 +84,24 @@ export class Session {
 
 export class SessionManager {
   private sessions = new Map<string, Session>();
+  private defaultBinaryPath?: string;
+
+  constructor(options?: { defaultBinaryPath?: string }) {
+    this.defaultBinaryPath = options?.defaultBinaryPath;
+  }
 
   createSession(options: SessionOptions = {}): Session {
-    const session = new Session(options);
+    const session = new Session({
+      binaryPath: options.binaryPath || this.defaultBinaryPath,
+      ...options,
+    });
     this.sessions.set(session.id, session);
-    logger.info("Created new session", { sessionId: session.id, cwd: session.cwd, model: session.model });
+    logger.info("Created new session", {
+      sessionId: session.id,
+      cwd: session.cwd,
+      model: session.model,
+      effort: session.effort,
+    });
     return session;
   }
 
