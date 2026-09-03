@@ -4,6 +4,16 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { logger } from "./logger.js";
 
+export interface SessionUsageState {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  contextWindowUsedTokens: number;
+  contextWindowMaxTokens: number;
+}
+
 export interface PersistedSessionState {
   sessionId: string;
   conversationId?: string;
@@ -11,6 +21,7 @@ export interface PersistedSessionState {
   model: string;
   effort: string;
   mode: string;
+  usage?: SessionUsageState;
   updatedAt: string;
 }
 

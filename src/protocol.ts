@@ -254,6 +254,267 @@ export interface ModelDefinition {
   name: string;
   description?: string;
   supportedEfforts: string[];
+  contextWindowMaxTokens?: number;
+}
+
+export interface ModelPricing {
+  inputCostPerM: number;
+  outputCostPerM: number;
+  cachedInputCostPerM: number;
+}
+
+export const MODEL_PRICING: Record<string, ModelPricing> = {
+  "gemini-3.8-flash": { inputCostPerM: 0.10, outputCostPerM: 0.40, cachedInputCostPerM: 0.025 },
+  "gemini-3.7-flash": { inputCostPerM: 0.10, outputCostPerM: 0.40, cachedInputCostPerM: 0.025 },
+  "gemini-3.6-flash": { inputCostPerM: 0.10, outputCostPerM: 0.40, cachedInputCostPerM: 0.025 },
+  "gemini-3.1-pro": { inputCostPerM: 1.25, outputCostPerM: 5.00, cachedInputCostPerM: 0.3125 },
+  "claude-sonnet-4-6": { inputCostPerM: 3.00, outputCostPerM: 15.00, cachedInputCostPerM: 0.30 },
+  "claude-opus-4-6-thinking": { inputCostPerM: 15.00, outputCostPerM: 75.00, cachedInputCostPerM: 1.50 },
+  "gpt-oss-120b": { inputCostPerM: 0.15, outputCostPerM: 0.60, cachedInputCostPerM: 0.0375 },
+};
+
+export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "gemini-3.8-flash": 1_048_576,
+  "gemini-3.7-flash": 1_048_576,
+  "gemini-3.6-flash": 1_048_576,
+  "gemini-3.1-pro": 2_097_152,
+  "claude-sonnet-4-6": 200_000,
+  "claude-opus-4-6-thinking": 200_000,
+  "gpt-oss-120b": 128_000,
+};
+
+export function getModelContextWindow(modelId?: string): number {
+  if (!modelId) return 1_048_576;
+  if (MODEL_CONTEXT_WINDOWS[modelId]) return MODEL_CONTEXT_WINDOWS[modelId];
+
+  const lower = modelId.toLowerCase();
+  if (lower.includes("pro")) return 2_097_152;
+  if (lower.includes("claude")) return 200_000;
+  if (lower.includes("gpt")) return 128_000;
+  if (lower.includes("flash")) return 1_048_576;
+
+  return 1_048_576;
+}
+
+export function getModelPricing(modelId?: string): ModelPricing | null {
+  if (!modelId) return null;
+  if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
+
+  const lower = modelId.toLowerCase();
+  if (lower.includes("opus")) return MODEL_PRICING["claude-opus-4-6-thinking"];
+  if (lower.includes("claude") || lower.includes("sonnet")) return MODEL_PRICING["claude-sonnet-4-6"];
+  if (lower.includes("pro")) return MODEL_PRICING["gemini-3.1-pro"];
+  if (lower.includes("flash")) return MODEL_PRICING["gemini-3.7-flash"];
+  if (lower.includes("gpt")) return MODEL_PRICING["gpt-oss-120b"];
+
+  return null;
+}
+
+// Keep costs at full JavaScript floating-point precision. Rounding happens
+// only when values are serialized for the UI so micro-costs accumulate.
+export function calculateUsageCostUsd(
+  modelId: string = "gemini-3.7-flash",
+  inputTokens: number = 0,
+  outputTokens: number = 0,
+  cachedInputTokens: number = 0
+): number {
+  const pricing = getModelPricing(modelId);
+  if (!pricing) return 0;
+  const inputCost = (inputTokens / 1_000_000) * pricing.inputCostPerM;
+  const outputCost = (outputTokens / 1_000_000) * pricing.outputCostPerM;
+  const cachedCost = (cachedInputTokens / 1_000_000) * pricing.cachedInputCostPerM;
+  return inputCost + outputCost + cachedCost;
+}
+
+export function roundUsageCostUsd(costUsd: number, decimals: number = 6): number {
+  const factor = 10 ** decimals;
+  return Math.round(costUsd * factor) / factor;
+}
+
+export interface QuotaWindow {
+  id: string;
+  label: string;
+  usedPct: number;
+  remainingPct: number;
+  resetsAt: string | null;
+  tone: "ok" | "warning" | "danger" | "default";
+}
+
+export function deriveUsageTone(usedPct: number): "ok" | "warning" | "danger" | "default" {
+  if (usedPct >= 90) return "danger";
+  if (usedPct >= 75) return "warning";
+  return "ok";
+}
+
+export function parseAgyQuotaOutput(raw: string): QuotaWindow[] {
+  const windows: QuotaWindow[] = [];
+  const lines = raw.split(/[\r\n]+/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.toLowerCase().startsWith("quota:")) continue;
+    const parts = trimmed.split(/\t+|\s{2,}/).map((p) => p.trim());
+    if (parts.length >= 3) {
+      const scope = parts[0];
+      const limitType = parts[1];
+      const remainingMatch = parts[2].match(/(\d+)%/);
+      const resetsAt = parts[3] || null;
+      if (remainingMatch) {
+        const remainingPct = parseInt(remainingMatch[1], 10);
+        const usedPct = Math.max(0, Math.min(100, 100 - remainingPct));
+        const isFiveHour = /five\s*hour/i.test(limitType);
+        const isWeekly = /weekly/i.test(limitType);
+        const isGemini = /gemini/i.test(scope);
+
+        let id = isFiveHour ? "session" : isWeekly ? "weekly" : "quota";
+        let label = isFiveHour ? "Session (5h)" : isWeekly ? "Weekly" : limitType;
+        if (!isGemini) {
+          id = `claude_${id}`;
+          label = `Claude ${label}`;
+        }
+
+        windows.push({
+          id,
+          label,
+          usedPct,
+          remainingPct,
+          resetsAt,
+          tone: deriveUsageTone(usedPct),
+        });
+      }
+    }
+  }
+  return windows;
+}
+
+export interface CreditsBalance {
+  id: string;
+  label: string;
+  remaining: number;
+  unit: "usd";
+  tone: "ok" | "warning" | "danger" | "default";
+}
+
+export function parseAgyCreditsOutput(raw: string): CreditsBalance {
+  const match = raw.match(/Remaining\s+credits\s+([\d.]+)/i);
+  const remaining = match ? parseFloat(match[1]) : 0;
+  return {
+    id: "credits",
+    label: "Credits",
+    remaining,
+    unit: "usd",
+    tone: remaining > 0 ? "ok" : "default",
+  };
+}
+
+export interface ProviderUsage {
+  providerId: string;
+  displayName: string;
+  status: "available" | "unavailable";
+  planLabel: string | null;
+  windows: QuotaWindow[];
+  balances: CreditsBalance[];
+  details: Array<{ id: string; label: string; value: string }>;
+  error: string | null;
+}
+
+let cachedProviderUsage: ProviderUsage | null = null;
+let cachedProviderUsageBinaryPath: string | null = null;
+let lastProviderUsageFetch = 0;
+const PROVIDER_USAGE_CACHE_TTL_MS = 30_000;
+
+function errorMessage(reason: unknown): string {
+  if (reason instanceof Error) return reason.message;
+  return String(reason || "unknown error");
+}
+
+function cacheProviderUsage(binaryPath: string, result: ProviderUsage, now: number): ProviderUsage {
+  cachedProviderUsage = result;
+  cachedProviderUsageBinaryPath = binaryPath;
+  lastProviderUsageFetch = now;
+  return result;
+}
+
+export async function fetchAntigravityUsage(
+  binaryPath: string = "agy",
+  force: boolean = false
+): Promise<ProviderUsage> {
+  const now = Date.now();
+  if (
+    !force &&
+    cachedProviderUsage &&
+    cachedProviderUsageBinaryPath === binaryPath &&
+    now - lastProviderUsageFetch < PROVIDER_USAGE_CACHE_TTL_MS
+  ) {
+    return cachedProviderUsage;
+  }
+
+  try {
+    const [usageResult, creditsResult] = await Promise.allSettled([
+      execFileAsync(binaryPath, ["--print", "/usage"], {
+        timeout: 8_000,
+        maxBuffer: 1024 * 1024,
+        env: process.env,
+      }),
+      execFileAsync(binaryPath, ["--print", "/credits"], {
+        timeout: 8_000,
+        maxBuffer: 1024 * 1024,
+        env: process.env,
+      }),
+    ]);
+
+    const balances: CreditsBalance[] = [];
+    if (creditsResult.status === "fulfilled") {
+      const creditsOutput = creditsResult.value.stdout || creditsResult.value.stderr || "";
+      if (creditsOutput.trim()) balances.push(parseAgyCreditsOutput(creditsOutput));
+    }
+
+    // /usage is the primary provider-availability probe. allSettled never
+    // throws for an exec failure, so rejected results must be handled here.
+    if (usageResult.status === "rejected") {
+      const error = `Unable to fetch Antigravity quota: ${errorMessage(usageResult.reason)}`;
+      logger.warn("Failed to fetch Antigravity provider usage", { error });
+      return cacheProviderUsage(binaryPath, {
+        providerId: "antigravity",
+        displayName: "Antigravity",
+        status: "unavailable",
+        planLabel: null,
+        windows: [],
+        balances,
+        details: [],
+        error,
+      }, now);
+    }
+
+    const quotaOutput = usageResult.value.stdout || usageResult.value.stderr || "";
+    const windows = parseAgyQuotaOutput(quotaOutput);
+    const partialError = creditsResult.status === "rejected"
+      ? `Credits unavailable: ${errorMessage(creditsResult.reason)}`
+      : null;
+
+    return cacheProviderUsage(binaryPath, {
+      providerId: "antigravity",
+      displayName: "Antigravity",
+      status: "available",
+      planLabel: "Google Gemini",
+      windows,
+      balances,
+      details: [],
+      error: partialError,
+    }, now);
+  } catch (err) {
+    const error = errorMessage(err);
+    logger.warn("Failed to fetch Antigravity provider usage", { error });
+    return cacheProviderUsage(binaryPath, {
+      providerId: "antigravity",
+      displayName: "Antigravity",
+      status: "unavailable",
+      planLabel: null,
+      windows: [],
+      balances: [],
+      details: [],
+      error,
+    }, now);
+  }
 }
 
 export const ALL_THINKING_LEVELS: Record<string, { name: string; description: string }> = {
@@ -263,13 +524,13 @@ export const ALL_THINKING_LEVELS: Record<string, { name: string; description: st
 };
 
 export const FALLBACK_MODELS: ModelDefinition[] = [
-  { modelId: "gemini-3.8-flash", name: "Gemini 3.8 Flash", description: "Google Gemini 3.8 Flash", supportedEfforts: ["high", "medium", "low"] },
-  { modelId: "gemini-3.7-flash", name: "Gemini 3.7 Flash", description: "Google Gemini 3.7 Flash", supportedEfforts: ["high", "medium", "low"] },
-  { modelId: "gemini-3.6-flash", name: "Gemini 3.6 Flash", description: "Google Gemini 3.6 Flash", supportedEfforts: ["high", "medium", "low"] },
-  { modelId: "gemini-3.1-pro", name: "Gemini 3.1 Pro", description: "Google Gemini 3.1 Pro", supportedEfforts: ["high", "low"] },
-  { modelId: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Thinking)", description: "Anthropic Claude Sonnet 4.6 (Thinking)", supportedEfforts: [] },
-  { modelId: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", description: "Anthropic Claude Opus 4.6 (Thinking)", supportedEfforts: [] },
-  { modelId: "gpt-oss-120b", name: "GPT-OSS 120B", description: "GPT-OSS 120B (Medium)", supportedEfforts: ["medium"] },
+  { modelId: "gemini-3.8-flash", name: "Gemini 3.8 Flash", description: "Google Gemini 3.8 Flash", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },
+  { modelId: "gemini-3.7-flash", name: "Gemini 3.7 Flash", description: "Google Gemini 3.7 Flash", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },
+  { modelId: "gemini-3.6-flash", name: "Gemini 3.6 Flash", description: "Google Gemini 3.6 Flash", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },
+  { modelId: "gemini-3.1-pro", name: "Gemini 3.1 Pro", description: "Google Gemini 3.1 Pro", supportedEfforts: ["high", "low"], contextWindowMaxTokens: 2_097_152 },
+  { modelId: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Thinking)", description: "Anthropic Claude Sonnet 4.6 (Thinking)", supportedEfforts: [], contextWindowMaxTokens: 200_000 },
+  { modelId: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", description: "Anthropic Claude Opus 4.6 (Thinking)", supportedEfforts: [], contextWindowMaxTokens: 200_000 },
+  { modelId: "gpt-oss-120b", name: "GPT-OSS 120B", description: "GPT-OSS 120B (Medium)", supportedEfforts: ["medium"], contextWindowMaxTokens: 128_000 },
 ];
 
 let cachedModels: ModelDefinition[] | null = null;
@@ -296,7 +557,13 @@ export function parseAgyModelsOutput(rawOutput: string): ModelDefinition[] {
       baseLabel = label.replace(/\s*\((High|Medium|Low)\)$/, "");
     }
     if (!modelsMap.has(baseId)) {
-      modelsMap.set(baseId, { modelId: baseId, name: baseLabel, description: label, supportedEfforts: [] });
+      modelsMap.set(baseId, {
+        modelId: baseId,
+        name: baseLabel,
+        description: label,
+        supportedEfforts: [],
+        contextWindowMaxTokens: getModelContextWindow(baseId),
+      });
     }
     if (effort) {
       const entry = modelsMap.get(baseId)!;

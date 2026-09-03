@@ -57,6 +57,7 @@ The ACP wire protocol uses snake_case method names. `agy-acp` accepts these meth
 | `session/set_model` | Change base model; restart before the next turn if needed |
 | `session/set_config_option` | Change `thought_level` / reasoning effort |
 | `session/update` | Stream messages, thoughts, tool calls, usage and commands to Paseo |
+| `provider/usage` | Return current Antigravity quota and credit state |
 
 For backwards compatibility, the server also accepts the exact pre-hardening aliases:
 
@@ -91,7 +92,7 @@ ACP session metadata is stored outside the repository under:
 ${XDG_STATE_HOME:-~/.local/state}/agy-acp/sessions/
 ```
 
-Each session is stored in its own `0600` JSON file inside a `0700` directory. The file name is a SHA-256 hash of the ACP session ID. Persisted state contains only:
+Each session is stored in its own `0600` JSON file inside a `0700` directory. Persisted state contains only:
 
 - ACP `sessionId`
 - Antigravity `conversation_id`
@@ -99,11 +100,22 @@ Each session is stored in its own `0600` JSON file inside a `0700` directory. Th
 - model
 - effort
 - mode
+- accumulated token/cost/context usage
 - update timestamp
 
 No Google credentials or OAuth tokens are read or persisted by the adapter.
 
 When Paseo requests `session/resume`, the adapter starts `agy --conversation <id>`, waits for its `init` event, and verifies that Antigravity actually opened the requested conversation before returning success.
+
+## Token usage, context window, cost and quota
+
+- Cumulative `inputTokens`, `outputTokens`, `cachedInputTokens` and `totalTokens` are persisted per ACP session.
+- Usage from a completed Antigravity `result` is recorded even when the turn ends with `status: ERROR`, because model/tool work may already have consumed billable tokens.
+- The model used for cost calculation is snapshotted at the beginning of the prompt operation. A `session/set_model` received mid-turn applies to the next Antigravity process, without repricing the current turn.
+- Raw session cost is accumulated without per-turn rounding. Rounding occurs only in UI-facing ACP payloads, preserving micro-costs across many small turns.
+- Context-window limits are attached to model definitions and streaming usage updates.
+- `fetchAntigravityUsage()` treats `/usage` as the primary availability probe. A failed, timed-out or missing `agy` command returns `status: unavailable` with an error instead of a false zero-usage `available` result.
+- `/credits` failure is treated as partial data loss when `/usage` succeeds: quota remains available, balances are omitted and the error explains the missing credit data.
 
 ## Child-process lifecycle
 

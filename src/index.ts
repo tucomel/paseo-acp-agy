@@ -2,13 +2,16 @@
 
 import { ACPServer } from "./acp-server.js";
 import { logger } from "./logger.js";
-
-const VERSION = "1.0.0";
+import { formatDiagnosticVersion, resolveBuildMetadata } from "./version.js";
 
 const args = process.argv.slice(2);
 
 if (args.includes("--version") || args.includes("-v")) {
-  process.stdout.write(`${VERSION}\n`);
+  if (args.includes("--json")) {
+    process.stdout.write(JSON.stringify(resolveBuildMetadata(), null, 2) + "\n");
+  } else {
+    process.stdout.write(`${formatDiagnosticVersion()}\n`);
+  }
   process.exit(0);
 }
 

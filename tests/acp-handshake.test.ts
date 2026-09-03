@@ -58,7 +58,7 @@ describe("ACP Handshake & Protocol", () => {
 
     const response = await waitForResponse(1);
     expect(response.result.serverInfo.name).toBe("agy-acp");
-    expect(response.result.serverInfo.version).toBe("1.0.0");
+    expect(response.result.serverInfo.version).toMatch(/^1\.1\.0/);
     expect(response.result.protocolVersion).toBe("1.0.0");
     expect(response.result.agentCapabilities.loadSession).toBe(false);
     expect(response.result.agentCapabilities.sessionCapabilities.resume).toBe(true);

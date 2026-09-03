@@ -14,9 +14,14 @@ import {
   AgyStepUpdateEvent,
   AgyResultEvent,
   ModelDefinition,
+  calculateUsageCostUsd,
+  roundUsageCostUsd,
+  getModelContextWindow,
+  fetchAntigravityUsage,
 } from "./protocol.js";
 import { SessionManager, Session } from "./session.js";
 import { executeSlashCommand, AVAILABLE_SLASH_COMMANDS } from "./slash-commands.js";
+import { getShortVersion } from "./version.js";
 
 function splitModelAndEffort(modelInput?: string): { model?: string; effort?: string } {
   if (!modelInput) return {};
@@ -137,6 +142,25 @@ export class ACPServer {
     return { models, model: models.find((candidate) => candidate.modelId === modelId) || null };
   }
 
+  private turnUsagePayload(
+    session: Session,
+    turnUsage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read_tokens?: number;
+    },
+    executingModel?: string
+  ) {
+    return {
+      inputTokens: turnUsage?.input_tokens ?? 0,
+      outputTokens: turnUsage?.output_tokens ?? 0,
+      cachedReadTokens: turnUsage?.cache_read_tokens ?? 0,
+      totalCostUsd: roundUsageCostUsd(session.usage.totalCostUsd),
+      contextWindowMaxTokens: getModelContextWindow(executingModel || session.model),
+      contextWindowUsedTokens: session.usage.contextWindowUsedTokens,
+    };
+  }
+
   private async handleLine(rawLine: string) {
     const trimmed = rawLine.trim();
     if (!trimmed) return;
@@ -164,11 +188,8 @@ export class ACPServer {
           if (!isNotification) {
             this.sendSuccess(id, {
               protocolVersion: "1.0.0",
-              serverInfo: { name: "agy-acp", version: "1.0.0" },
+              serverInfo: { name: "agy-acp", version: getShortVersion() },
               agentCapabilities: {
-                // session/load requires history replay through session/update.
-                // agy-acp intentionally exposes resume-only persistence until
-                // that replay contract is implemented.
                 loadSession: false,
                 sessionCapabilities: { resume: true },
               },
@@ -230,10 +251,6 @@ export class ACPServer {
               });
               created = true;
             }
-
-            // Validate the persisted Antigravity conversation now. Do not tell
-            // Paseo that resume succeeded and defer a broken --conversation to
-            // the next user prompt.
             await session.ensureReadyForResume();
 
             if (!isNotification) {
@@ -266,9 +283,6 @@ export class ACPServer {
             break;
           }
 
-          // Reserve at the session boundary before the first await. This covers
-          // both intercepted slash commands and ordinary prompts, so a second
-          // session/prompt cannot enter while an async slash command is running.
           if (!session.tryBeginPromptOperation()) {
             if (!isNotification) {
               this.sendError(id, -32000, "A prompt operation is already in progress on this session");
@@ -276,13 +290,18 @@ export class ACPServer {
             break;
           }
 
+          // Snapshot the model that will actually execute this turn. A model
+          // change received while the turn is running only applies after the
+          // Antigravity process restarts for the next turn.
+          const executingModel = session.model;
+
           try {
             session.touch();
             const promptText = extractPromptText(params.prompt);
             logger.info("Processing ACP prompt", {
               sessionId,
               promptLength: promptText.length,
-              model: session.model,
+              model: executingModel,
               effort: session.effort,
             });
 
@@ -364,6 +383,12 @@ export class ACPServer {
               }
 
               if (step.usage) {
+                const turnCost = calculateUsageCostUsd(
+                  executingModel,
+                  step.usage.input_tokens || 0,
+                  step.usage.output_tokens || 0,
+                  step.usage.cache_read_tokens || 0
+                );
                 this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                   sessionId: session.id,
                   update: {
@@ -371,6 +396,10 @@ export class ACPServer {
                     inputTokens: step.usage.input_tokens,
                     outputTokens: step.usage.output_tokens,
                     cachedReadTokens: step.usage.cache_read_tokens,
+                    totalCostUsd: roundUsageCostUsd(session.usage.totalCostUsd + turnCost),
+                    contextWindowMaxTokens: getModelContextWindow(executingModel),
+                    contextWindowUsedTokens:
+                      (step.usage.input_tokens || 0) + (step.usage.output_tokens || 0),
                   },
                 });
               }
@@ -381,8 +410,17 @@ export class ACPServer {
                 promptText,
                 onStepUpdate
               );
+              const turnUsage = resultEvent.result?.usage;
+
+              // Usage is billable even when the turn terminates with ERROR
+              // after model/tool work. Record it before branching on status.
+              session.recordTurnUsage(turnUsage, executingModel);
+              const usagePayload = this.turnUsagePayload(session, turnUsage, executingModel);
+
               if (session.isCancelled) {
-                if (!isNotification) this.sendSuccess(id, { stopReason: "cancelled" });
+                if (!isNotification) {
+                  this.sendSuccess(id, { stopReason: "cancelled", usage: usagePayload });
+                }
               } else if (resultEvent.result?.status === "ERROR") {
                 const errorMessage = resultEvent.result.error || "Turn failed with an error";
                 logger.error("Turn result reported error", { error: errorMessage, sessionId });
@@ -393,9 +431,11 @@ export class ACPServer {
                     content: { type: "text", text: `\n\n**Error:** ${errorMessage}\n` },
                   },
                 });
-                if (!isNotification) this.sendSuccess(id, { stopReason: "refusal" });
+                if (!isNotification) {
+                  this.sendSuccess(id, { stopReason: "refusal", usage: usagePayload });
+                }
               } else if (!isNotification) {
-                this.sendSuccess(id, { stopReason: "end_turn" });
+                this.sendSuccess(id, { stopReason: "end_turn", usage: usagePayload });
               }
             } catch (promptErr) {
               if (session.isCancelled) {
@@ -545,6 +585,14 @@ export class ACPServer {
             models
           );
           if (!isNotification) this.sendSuccess(id, { configOptions });
+          break;
+        }
+
+        case "provider/usage":
+        case "antigravity/usage":
+        case "session/usage": {
+          const usage = await fetchAntigravityUsage(this.binaryPath);
+          if (!isNotification) this.sendSuccess(id, usage);
           break;
         }
 

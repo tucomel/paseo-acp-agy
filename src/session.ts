@@ -2,7 +2,13 @@ import crypto from "node:crypto";
 import { AntigravityProcess } from "./antigravity-process.js";
 import { logger } from "./logger.js";
 import { resolvePermissionSettings } from "./permissions.js";
-import { PersistedSessionState, SessionStore, sessionStore } from "./session-store.js";
+import { calculateUsageCostUsd, getModelContextWindow } from "./protocol.js";
+import {
+  PersistedSessionState,
+  SessionStore,
+  SessionUsageState,
+  sessionStore,
+} from "./session-store.js";
 
 export interface SessionOptions {
   id?: string;
@@ -11,6 +17,7 @@ export interface SessionOptions {
   effort?: string;
   mode?: string;
   conversationId?: string;
+  usage?: SessionUsageState;
   sandbox?: boolean;
   dangerouslySkipPermissions?: boolean;
   env?: Record<string, string>;
@@ -28,6 +35,7 @@ export class Session {
   public lastActivity: Date;
   public isCancelled = false;
   public process: AntigravityProcess;
+  public usage: SessionUsageState;
   private store: SessionStore;
   private promptOperationActive = false;
 
@@ -40,6 +48,15 @@ export class Session {
     this.createdAt = new Date();
     this.lastActivity = new Date();
     this.store = options.store || sessionStore;
+    this.usage = options.usage || {
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      totalTokens: 0,
+      totalCostUsd: 0,
+      contextWindowUsedTokens: 0,
+      contextWindowMaxTokens: getModelContextWindow(this.model),
+    };
 
     const permissions = resolvePermissionSettings({
       sandbox: options.sandbox,
@@ -71,6 +88,7 @@ export class Session {
       model: this.model,
       effort: this.effort,
       mode: this.mode,
+      usage: this.usage,
       updatedAt: new Date().toISOString(),
     };
   }
@@ -96,6 +114,7 @@ export class Session {
 
   setModel(model: string) {
     this.model = model;
+    this.usage.contextWindowMaxTokens = getModelContextWindow(model);
     this.process.setModel(model);
     this.persist();
   }
@@ -144,6 +163,35 @@ export class Session {
     }
   }
 
+  recordTurnUsage(
+    turnUsage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read_tokens?: number;
+      total_tokens?: number;
+    },
+    executingModel: string = this.model
+  ) {
+    if (!turnUsage) return;
+    const input = turnUsage.input_tokens || 0;
+    const output = turnUsage.output_tokens || 0;
+    const cached = turnUsage.cache_read_tokens || 0;
+    const turnCost = calculateUsageCostUsd(executingModel, input, output, cached);
+
+    this.usage.inputTokens += input;
+    this.usage.outputTokens += output;
+    this.usage.cachedInputTokens += cached;
+    this.usage.totalTokens = this.usage.inputTokens + this.usage.outputTokens;
+    // Keep the accumulator unrounded. Micro-costs must survive across turns.
+    this.usage.totalCostUsd += turnCost;
+    this.usage.contextWindowUsedTokens = input + output;
+    // The selected model may have changed while this turn was running. Keep
+    // the stored meter aligned with the model currently selected for next turn.
+    this.usage.contextWindowMaxTokens = getModelContextWindow(this.model);
+
+    this.persist();
+  }
+
   touch() {
     this.lastActivity = new Date();
   }
@@ -187,6 +235,7 @@ export class SessionManager {
       effort: options.effort || persisted?.effort,
       mode: options.mode || persisted?.mode,
       conversationId: options.conversationId || persisted?.conversationId,
+      usage: options.usage || persisted?.usage,
       sandbox: options.sandbox,
       dangerouslySkipPermissions: options.dangerouslySkipPermissions,
       env: options.env,
