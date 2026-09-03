@@ -6,6 +6,8 @@ import { PassThrough } from "node:stream";
 import {
   calculateUsageCostUsd,
   getModelContextWindow,
+  getModelPricing,
+  MODEL_PRICING,
   parseAgyQuotaOutput,
   parseAgyCreditsOutput,
   deriveUsageTone,
@@ -101,6 +103,20 @@ describe("Usage, Context Window & Pricing", () => {
       expect(
         calculateUsageCostUsd("gemini-3.9-pro-preview", 100_000, 2_000, 0)
       ).toBeCloseTo(0.135, 12);
+    });
+
+    it("restricts GPT fallback pricing to rate-equivalent GPT-OSS models and leaves other GPT models unmapped", () => {
+      // Known rate-equivalent gpt-oss variants match gpt-oss-120b pricing
+      expect(
+        calculateUsageCostUsd("gpt-oss-120b-medium", 100_000, 10_000, 0)
+      ).toBeCloseTo(0.021, 12);
+      expect(getModelPricing("gpt-oss-120b-medium")).toEqual(MODEL_PRICING["gpt-oss-120b"]);
+
+      // Unmapped or differently priced GPT models (e.g. gpt-5, gpt-4o) must not be billed at GPT-OSS rates
+      expect(calculateUsageCostUsd("gpt-5", 100_000, 10_000, 0)).toBe(0);
+      expect(calculateUsageCostUsd("gpt-4o", 100_000, 10_000, 0)).toBe(0);
+      expect(getModelPricing("gpt-5")).toBeNull();
+      expect(getModelPricing("gpt-4o")).toBeNull();
     });
   });
 

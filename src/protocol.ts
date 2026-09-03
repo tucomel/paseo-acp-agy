@@ -305,7 +305,7 @@ export function getModelPricing(modelId?: string): ModelPricing | null {
   if (lower.includes("claude") || lower.includes("sonnet")) return MODEL_PRICING["claude-sonnet-4-6"];
   if (lower.includes("pro")) return MODEL_PRICING["gemini-3.1-pro"];
   if (lower.includes("flash")) return MODEL_PRICING["gemini-3.7-flash"];
-  if (lower.includes("gpt")) return MODEL_PRICING["gpt-oss-120b"];
+  if (lower.includes("gpt-oss")) return MODEL_PRICING["gpt-oss-120b"];
 
   return null;
 }
