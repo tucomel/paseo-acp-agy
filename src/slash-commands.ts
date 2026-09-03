@@ -5,8 +5,14 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { logger } from "./logger.js";
 import { Session } from "./session.js";
+import { sessionStore } from "./session-store.js";
 
 const execFileAsync = promisify(execFile);
+const AGY_COMMAND_TIMEOUT_MS = 30_000;
+const AGY_COMMAND_MAX_BUFFER = 4 * 1024 * 1024;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SAFE_LOOKUP_ID_RE = /^[A-Za-z0-9_-]{6,128}$/;
+const SAFE_CONVERSATION_PREFIX_RE = /^[0-9a-f-]{6,36}$/i;
 
 export interface SlashCommandDefinition {
   name: string;
@@ -15,39 +21,14 @@ export interface SlashCommandDefinition {
 }
 
 export const AVAILABLE_SLASH_COMMANDS: SlashCommandDefinition[] = [
-  {
-    name: "resume",
-    description: "Listar ou retomar uma sessão anterior (/resume ou /resume <id>)",
-    argumentHint: "<conversation-ou-agent-id>",
-  },
-  {
-    name: "usage",
-    description: "Exibir uso e quota restante dos modelos (Gemini, Claude, GPT)",
-  },
-  {
-    name: "quota",
-    description: "Alias para /usage",
-  },
-  {
-    name: "help",
-    description: "Exibir lista de comandos e opções disponíveis",
-  },
-  {
-    name: "credits",
-    description: "Exibir saldo de créditos G1",
-  },
-  {
-    name: "skills",
-    description: "Listar skills instaladas no Antigravity",
-  },
-  {
-    name: "agents",
-    description: "Listar agentes disponíveis",
-  },
-  {
-    name: "changelog",
-    description: "Exibir notas de versão e novidades do Antigravity",
-  },
+  { name: "resume", description: "Listar ou retomar uma sessão anterior (/resume ou /resume <id>)", argumentHint: "<conversation-ou-agent-id>" },
+  { name: "usage", description: "Exibir uso e quota restante dos modelos (Gemini, Claude, GPT)" },
+  { name: "quota", description: "Alias para /usage" },
+  { name: "help", description: "Exibir lista de comandos e opções disponíveis" },
+  { name: "credits", description: "Exibir saldo de créditos G1" },
+  { name: "skills", description: "Listar skills instaladas no Antigravity" },
+  { name: "agents", description: "Listar agentes disponíveis" },
+  { name: "changelog", description: "Exibir notas de versão e novidades do Antigravity" },
 ];
 
 export interface RecentConversation {
@@ -65,71 +46,85 @@ export interface ConversationStepItem {
   text: string;
 }
 
-export function listRecentConversations(limit: number = 10): RecentConversation[] {
-  const brainDir = path.join(os.homedir(), ".gemini", "antigravity-cli", "brain");
-  if (!fs.existsSync(brainDir)) {
-    return [];
-  }
+function brainDir(): string {
+  return path.join(os.homedir(), ".gemini", "antigravity-cli", "brain");
+}
 
-  const results: RecentConversation[] = [];
+function transcriptPath(conversationId: string): string | null {
+  if (!UUID_RE.test(conversationId)) return null;
+  return path.join(brainDir(), conversationId, ".system_generated", "logs", "transcript.jsonl");
+}
+
+function summarizeConversation(cid: string, logFile: string, mtime: number): RecentConversation | null {
+  try {
+    const lines = fs.readFileSync(logFile, "utf8").split("\n").filter(Boolean);
+    let firstPrompt = "";
+    let userTurns = 0;
+    for (const line of lines) {
+      if (!line.includes('"USER_INPUT"')) continue;
+      userTurns++;
+      if (!firstPrompt) {
+        try {
+          const parsed = JSON.parse(line);
+          let text = String(parsed.content || "");
+          if (text.includes("<USER_REQUEST>")) {
+            text = text.split("<USER_REQUEST>")[1].split("</USER_REQUEST>")[0];
+          }
+          firstPrompt = text.trim().replace(/\s+/g, " ").slice(0, 80);
+        } catch {}
+      }
+    }
+    const date = new Date(mtime);
+    return {
+      id: cid,
+      mtime,
+      dateStr: date.toLocaleString("pt-BR", {
+        timeZone: "America/Sao_Paulo",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+      firstPrompt: firstPrompt || "(sem texto inicial)",
+      totalSteps: lines.length,
+      userTurns,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function listRecentConversations(limit = 10): RecentConversation[] {
+  const root = brainDir();
+  if (!fs.existsSync(root) || limit <= 0) return [];
 
   try {
-    const entries = fs.readdirSync(brainDir);
-    for (const cid of entries) {
-      if (cid.length !== 36) continue;
-      const logFile = path.join(brainDir, cid, ".system_generated", "logs", "transcript.jsonl");
-      if (!fs.existsSync(logFile)) continue;
-
+    // Stat every candidate first, then read only the newest transcripts. This
+    // keeps /resume proportional to the requested result count instead of the
+    // total accumulated history size.
+    const candidates: Array<{ id: string; logFile: string; mtime: number }> = [];
+    for (const cid of fs.readdirSync(root)) {
+      if (!UUID_RE.test(cid)) continue;
+      const logFile = transcriptPath(cid);
+      if (!logFile || !fs.existsSync(logFile)) continue;
       try {
-        const stat = fs.statSync(logFile);
-        let firstPrompt = "";
-        const content = fs.readFileSync(logFile, "utf8");
-        const lines = content.split("\n").filter(Boolean);
-        const totalSteps = lines.length;
-        let userTurns = 0;
-
-        for (const line of lines) {
-          if (!line.includes('"USER_INPUT"')) continue;
-          userTurns++;
-          if (!firstPrompt) {
-            try {
-              const parsed = JSON.parse(line);
-              let text = String(parsed.content || "");
-              if (text.includes("<USER_REQUEST>")) {
-                text = text.split("<USER_REQUEST>")[1].split("</USER_REQUEST>")[0];
-              }
-              firstPrompt = text.trim().replace(/\s+/g, " ").slice(0, 80);
-            } catch {}
-          }
-        }
-
-        const date = new Date(stat.mtimeMs);
-        const dateStr = date.toLocaleString("pt-BR", {
-          timeZone: "America/Sao_Paulo",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-
-        results.push({
-          id: cid,
-          mtime: stat.mtimeMs,
-          dateStr,
-          firstPrompt: firstPrompt || "(sem texto inicial)",
-          totalSteps,
-          userTurns,
-        });
+        candidates.push({ id: cid, logFile, mtime: fs.statSync(logFile).mtimeMs });
       } catch {}
     }
+
+    candidates.sort((a, b) => b.mtime - a.mtime);
+    const results: RecentConversation[] = [];
+    for (const candidate of candidates.slice(0, limit)) {
+      const summary = summarizeConversation(candidate.id, candidate.logFile, candidate.mtime);
+      if (summary) results.push(summary);
+    }
+    return results;
   } catch (err) {
     logger.warn("Failed to read recent conversations from brain", {
       error: (err as Error).message,
     });
+    return [];
   }
-
-  results.sort((a, b) => b.mtime - a.mtime);
-  return results.slice(0, limit);
 }
 
 export function getConversationSteps(cid: string): {
@@ -137,16 +132,12 @@ export function getConversationSteps(cid: string): {
   userTurns: number;
   steps: ConversationStepItem[];
 } | null {
-  const brainDir = path.join(os.homedir(), ".gemini", "antigravity-cli", "brain");
-  const logFile = path.join(brainDir, cid, ".system_generated", "logs", "transcript.jsonl");
-  if (!fs.existsSync(logFile)) return null;
-
+  const logFile = transcriptPath(cid);
+  if (!logFile || !fs.existsSync(logFile)) return null;
   try {
-    const content = fs.readFileSync(logFile, "utf8");
-    const lines = content.split("\n").filter(Boolean);
+    const lines = fs.readFileSync(logFile, "utf8").split("\n").filter(Boolean);
     const steps: ConversationStepItem[] = [];
     let userTurns = 0;
-
     for (let i = 0; i < lines.length; i++) {
       try {
         const data = JSON.parse(lines[i]);
@@ -154,7 +145,6 @@ export function getConversationSteps(cid: string): {
         const type = data.type;
         let text = "";
         let role: "user" | "assistant" | "tool" = "assistant";
-
         if (type === "USER_INPUT") {
           userTurns++;
           role = "user";
@@ -164,7 +154,7 @@ export function getConversationSteps(cid: string): {
           }
           text = raw.trim().replace(/\s+/g, " ").slice(0, 90);
         } else if (type === "PLANNER_RESPONSE") {
-          const toolCalls = data.tool_calls || [];
+          const toolCalls = Array.isArray(data.tool_calls) ? data.tool_calls : [];
           if (toolCalls.length > 0) {
             role = "tool";
             const toolNames = toolCalls.map((tc: any) => {
@@ -181,17 +171,12 @@ export function getConversationSteps(cid: string): {
             });
             text = "Ferramenta: " + toolNames.join(", ");
           } else if (data.content) {
-            role = "assistant";
             text = String(data.content).trim().replace(/\s+/g, " ").slice(0, 90);
           }
         }
-
-        if (text) {
-          steps.push({ index: idx, role, text });
-        }
+        if (text) steps.push({ index: idx, role, text });
       } catch {}
     }
-
     return { totalSteps: lines.length, userTurns, steps };
   } catch {
     return null;
@@ -201,94 +186,66 @@ export function getConversationSteps(cid: string): {
 export function formatStepsTimeline(steps: ConversationStepItem[]): string {
   if (steps.length === 0) return "";
   let md = "#### 📜 Histórico de Passos (Steps):\n";
-
+  const append = (step: ConversationStepItem) => {
+    const roleLabel =
+      step.role === "user" ? "User" : step.role === "tool" ? "Ferramenta" : "Assistente";
+    md += `• **Step ${step.index}** *(${roleLabel})*: ${step.text}\n`;
+  };
   if (steps.length <= 8) {
-    for (const s of steps) {
-      const roleLabel = s.role === "user" ? "User" : s.role === "tool" ? "Ferramenta" : "Assistente";
-      md += `• **Step ${s.index}** *(${roleLabel})*: ${s.text}\n`;
-    }
+    steps.forEach(append);
   } else {
-    for (let i = 0; i < 2; i++) {
-      const s = steps[i];
-      const roleLabel = s.role === "user" ? "User" : s.role === "tool" ? "Ferramenta" : "Assistente";
-      md += `• **Step ${s.index}** *(${roleLabel})*: ${s.text}\n`;
-    }
-    const hiddenCount = steps.length - 7;
-    md += `• *... (${hiddenCount} passos intermediários ocultos) ...*\n`;
-    for (let i = steps.length - 5; i < steps.length; i++) {
-      const s = steps[i];
-      const roleLabel = s.role === "user" ? "User" : s.role === "tool" ? "Ferramenta" : "Assistente";
-      md += `• **Step ${s.index}** *(${roleLabel})*: ${s.text}\n`;
-    }
+    steps.slice(0, 2).forEach(append);
+    md += `• *... (${steps.length - 7} passos intermediários ocultos) ...*\n`;
+    steps.slice(-5).forEach(append);
   }
   return md;
 }
 
 export function resolveTargetConversationId(targetId: string): string | null {
   const cleanId = targetId.trim();
-  const brainDir = path.join(os.homedir(), ".gemini", "antigravity-cli", "brain");
+  if (!cleanId || !SAFE_LOOKUP_ID_RE.test(cleanId)) return null;
 
-  // Direct conversation ID check
-  if (fs.existsSync(path.join(brainDir, cleanId))) {
-    return cleanId;
+  const persisted = sessionStore.load(cleanId);
+  if (persisted?.conversationId && UUID_RE.test(persisted.conversationId)) {
+    return persisted.conversationId;
   }
 
-  // Prefix match on conversation ID
-  try {
-    const brainEntries = fs.readdirSync(brainDir);
-    const match = brainEntries.find((e) => e.startsWith(cleanId) && e.length === 36);
-    if (match) {
-      return match;
-    }
-  } catch {}
-
-  // Check Paseo agent store to see if targetId is a Paseo agent ID
-  const paseoAgentsDir = path.join(os.homedir(), ".paseo", "agents");
-  if (fs.existsSync(paseoAgentsDir)) {
+  const root = brainDir();
+  if (UUID_RE.test(cleanId) && fs.existsSync(path.join(root, cleanId))) return cleanId;
+  if (SAFE_CONVERSATION_PREFIX_RE.test(cleanId)) {
     try {
-      const subdirs = fs.readdirSync(paseoAgentsDir);
-      for (const sub of subdirs) {
-        const fullSub = path.join(paseoAgentsDir, sub);
-        if (!fs.statSync(fullSub).isDirectory()) continue;
-        const files = fs.readdirSync(fullSub);
-        for (const file of files) {
-          if (file.startsWith(cleanId) && file.endsWith(".json")) {
-            const agentJson = JSON.parse(fs.readFileSync(path.join(fullSub, file), "utf8"));
-            const pSessionId = agentJson.runtimeInfo?.sessionId;
-            if (pSessionId) {
-              const logPath = path.join(
-                os.homedir(),
-                ".local",
-                "state",
-                "agy-acp",
-                "agy-acp.log"
-              );
-              if (fs.existsSync(logPath)) {
-                const lines = fs.readFileSync(logPath, "utf8").split("\n");
-                for (let i = lines.length - 1; i >= 0; i--) {
-                  const line = lines[i];
-                  if (line.includes(pSessionId) && line.includes("--conversation")) {
-                    const matchConv = line.match(/--conversation",\s*"([a-f0-9-]+)"/);
-                    if (matchConv) {
-                      return matchConv[1];
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
+      const matches = fs
+        .readdirSync(root)
+        .filter((entry) => UUID_RE.test(entry) && entry.startsWith(cleanId));
+      if (matches.length === 1) return matches[0];
+      if (matches.length > 1) return null;
     } catch {}
   }
 
+  const paseoAgentsDir = path.join(os.homedir(), ".paseo", "agents");
+  if (!fs.existsSync(paseoAgentsDir)) return null;
+  try {
+    for (const sub of fs.readdirSync(paseoAgentsDir)) {
+      const fullSub = path.join(paseoAgentsDir, sub);
+      if (!fs.statSync(fullSub).isDirectory()) continue;
+      for (const file of fs.readdirSync(fullSub)) {
+        if (!file.startsWith(cleanId) || !file.endsWith(".json")) continue;
+        const agentJson = JSON.parse(fs.readFileSync(path.join(fullSub, file), "utf8"));
+        const paseoSessionId = agentJson.runtimeInfo?.sessionId;
+        if (typeof paseoSessionId !== "string") continue;
+        const state = sessionStore.load(paseoSessionId);
+        if (state?.conversationId && UUID_RE.test(state.conversationId)) {
+          return state.conversationId;
+        }
+      }
+    }
+  } catch {}
   return null;
 }
 
 function renderProgressBar(percentage: number): string {
-  const total = 10;
-  const filled = Math.max(0, Math.min(total, Math.round((percentage / 100) * total)));
-  return "█".repeat(filled) + "░".repeat(total - filled);
+  const filled = Math.max(0, Math.min(10, Math.round(percentage / 10)));
+  return "█".repeat(filled) + "░".repeat(10 - filled);
 }
 
 function getStatusBadge(percentage: number): string {
@@ -300,11 +257,11 @@ function getStatusBadge(percentage: number): string {
 function formatCountdown(isoStr: string): string {
   try {
     const target = new Date(isoStr);
-    const now = new Date();
-    const diffMs = target.getTime() - now.getTime();
+    const diffMs = target.getTime() - Date.now();
+    if (!Number.isFinite(diffMs)) return isoStr;
     if (diffMs <= 0) return "agora";
-    const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-    const diffMins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+    const diffHours = Math.floor(diffMs / 3_600_000);
+    const diffMins = Math.floor((diffMs % 3_600_000) / 60_000);
     const timeStr = target.toLocaleTimeString("pt-BR", {
       timeZone: "America/Sao_Paulo",
       hour: "2-digit",
@@ -315,65 +272,48 @@ function formatCountdown(isoStr: string): string {
       day: "2-digit",
       month: "2-digit",
     });
-
-    if (diffHours < 24) {
-      return `em **${diffHours}h ${diffMins}m** *(às ${timeStr})*`;
-    }
+    if (diffHours < 24) return `em **${diffHours}h ${diffMins}m** *(às ${timeStr})*`;
     const days = Math.floor(diffHours / 24);
-    const dayWord = days === 1 ? "dia" : "dias";
-    return `em **${days} ${dayWord}** *(${dateStr} às ${timeStr})*`;
+    return `em **${days} ${days === 1 ? "dia" : "dias"}** *(${dateStr} às ${timeStr})*`;
   } catch {
     return isoStr;
   }
 }
 
 export function formatUsageOutput(rawText: string): string {
-  const lines = rawText.trim().split("\n");
   const groups = new Map<
     string,
     {
       icon: string;
-      items: Array<{
-        win: string;
-        isFiveHour: boolean;
-        pct: number;
-        pctStr: string;
-        reset: string;
-      }>;
+      items: Array<{ win: string; isFiveHour: boolean; pct: number; pctStr: string; reset: string }>;
     }
   >();
-
-  for (const line of lines) {
+  for (const line of rawText.trim().split("\n")) {
     const parts = line.includes("\t") ? line.split("\t") : line.split(/\s{2,}/);
-    if (parts.length >= 3) {
-      let fam = parts[0].trim();
-      let icon = "🤖";
-      if (fam.toLowerCase().includes("gemini")) {
-        fam = "Google Gemini";
-        icon = "🔷";
-      } else if (fam.toLowerCase().includes("claude")) {
-        fam = "Claude & GPT";
-        icon = "🔶";
-      }
-
-      let win = parts[1].replace(" Remaining", "").trim();
-      let isFiveHour = false;
-      if (win.toLowerCase().includes("five hour") || win.includes("5")) {
-        win = "Janela de 5 Horas";
-        isFiveHour = true;
-      } else if (win.toLowerCase().includes("weekly")) {
-        win = "Cota Semanal";
-      }
-
-      const pctStr = parts[2].trim();
-      const pct = parseInt(pctStr.replace("%", ""), 10) || 0;
-      const reset = parts[3] ? parts[3].trim() : "";
-
-      if (!groups.has(fam)) {
-        groups.set(fam, { icon, items: [] });
-      }
-      groups.get(fam)!.items.push({ win, isFiveHour, pct, pctStr, reset });
+    if (parts.length < 3) continue;
+    let fam = parts[0].trim();
+    let icon = "🤖";
+    if (fam.toLowerCase().includes("gemini")) {
+      fam = "Google Gemini";
+      icon = "🔷";
+    } else if (fam.toLowerCase().includes("claude")) {
+      fam = "Claude & GPT";
+      icon = "🔶";
     }
+    const rawWindow = parts[1].replace(" Remaining", "").trim();
+    const lowerWindow = rawWindow.toLowerCase();
+    const isFiveHour = lowerWindow.includes("five hour") || /\b5\s*hour/.test(lowerWindow);
+    const win = isFiveHour
+      ? "Janela de 5 Horas"
+      : lowerWindow.includes("weekly")
+        ? "Cota Semanal"
+        : rawWindow;
+    const pctStr = parts[2].trim();
+    const parsedPct = Number.parseInt(pctStr.replace("%", ""), 10);
+    const pct = Number.isFinite(parsedPct) ? parsedPct : 0;
+    const reset = parts[3]?.trim() || "";
+    if (!groups.has(fam)) groups.set(fam, { icon, items: [] });
+    groups.get(fam)!.items.push({ win, isFiveHour, pct, pctStr, reset });
   }
 
   if (groups.size === 0) {
@@ -381,23 +321,29 @@ export function formatUsageOutput(rawText: string): string {
   }
 
   let out = "### ⚡ Quotas de Uso — Antigravity\n\n";
-
   for (const [fam, data] of groups.entries()) {
-    data.items.sort((a, b) => (b.isFiveHour ? 1 : 0) - (a.isFiveHour ? 1 : 0));
-
+    data.items.sort((a, b) => Number(b.isFiveHour) - Number(a.isFiveHour));
     out += `**${data.icon} ${fam}**\n`;
-    for (const it of data.items) {
-      const bar = renderProgressBar(it.pct);
-      const icon = getStatusBadge(it.pct);
-      const countdown = it.reset ? formatCountdown(it.reset) : "";
-      out += `• **${it.win}:** ${icon} **${it.pctStr}** livre  \n`;
-      out += `  \`[${bar}]\` · Reset ${countdown}\n`;
+    for (const item of data.items) {
+      out += `• **${item.win}:** ${getStatusBadge(item.pct)} **${item.pctStr}** livre  \n`;
+      out += `  \`[${renderProgressBar(item.pct)}]\` · Reset ${
+        item.reset ? formatCountdown(item.reset) : ""
+      }\n`;
     }
     out += "\n";
   }
-
   out += "---\n> 💡 *A janela de 5 horas renova dinamicamente conforme o tempo passa.*";
   return out;
+}
+
+async function runAgySlash(binaryPath: string, cwd: string, slashCommand: string): Promise<string> {
+  const { stdout, stderr } = await execFileAsync(binaryPath, ["--print", slashCommand], {
+    cwd,
+    env: process.env,
+    timeout: AGY_COMMAND_TIMEOUT_MS,
+    maxBuffer: AGY_COMMAND_MAX_BUFFER,
+  });
+  return stdout.trim() || stderr.trim();
 }
 
 export async function executeSlashCommand(
@@ -406,14 +352,10 @@ export async function executeSlashCommand(
   binaryPath: string
 ): Promise<{ handled: boolean; response?: string }> {
   const trimmed = promptText.trim();
-  if (!trimmed.startsWith("/")) {
-    return { handled: false };
-  }
-
+  if (!trimmed.startsWith("/")) return { handled: false };
   const parts = trimmed.slice(1).split(/\s+/);
   const command = parts[0].toLowerCase();
   const args = parts.slice(1).join(" ").trim();
-
   logger.info("Intercepted slash command", { command, args, sessionId: session.id });
 
   switch (command) {
@@ -423,24 +365,19 @@ export async function executeSlashCommand(
         if (recent.length === 0) {
           return {
             handled: true,
-            response:
-              "Nenhuma sessão anterior foi encontrada no histórico local do Antigravity.",
+            response: "Nenhuma sessão anterior foi encontrada no histórico local do Antigravity.",
           };
         }
-
         let list = "### 📋 Sessões Recentes do Antigravity\n\n";
-        for (const c of recent) {
-          const stepsText =
-            c.totalSteps > 0
-              ? ` · 🟢 **${c.totalSteps} steps** (${c.userTurns} turno${c.userTurns !== 1 ? "s" : ""})`
-              : "";
-          list += `• **${c.dateStr}**${stepsText}  \n`;
-          list += `  *${c.firstPrompt}*  \n`;
-          list += `  \`/resume ${c.id}\`\n\n`;
+        for (const conversation of recent) {
+          const stepsText = conversation.totalSteps > 0
+            ? ` · 🟢 **${conversation.totalSteps} steps** (${conversation.userTurns} turno${
+                conversation.userTurns !== 1 ? "s" : ""
+              })`
+            : "";
+          list += `• **${conversation.dateStr}**${stepsText}  \n  *${conversation.firstPrompt}*  \n  \`/resume ${conversation.id}\`\n\n`;
         }
-        list +=
-          "---\n💡 *Copie ou digite `/resume <ID>` acima para retomar qualquer sessão.*";
-
+        list += "---\n💡 *Copie ou digite `/resume <ID>` acima para retomar qualquer sessão.*";
         return { handled: true, response: list };
       }
 
@@ -452,22 +389,28 @@ export async function executeSlashCommand(
         };
       }
 
-      await session.process.setConversationId(resolvedConvId);
+      try {
+        // Validate --conversation immediately instead of reporting success and
+        // discovering a broken resume on the user's next message.
+        await session.resumeConversation(resolvedConvId);
+      } catch (err) {
+        return {
+          handled: true,
+          response: `❌ **Falha ao retomar sessão.**\n\n${(err as Error).message}`,
+        };
+      }
+
       logger.info("Resumed conversation for session", {
         sessionId: session.id,
         conversationId: resolvedConvId,
       });
-
       const details = getConversationSteps(resolvedConvId);
-      let stepsSection = "";
-      if (details && details.steps.length > 0) {
-        stepsSection = "\n" + formatStepsTimeline(details.steps) + "\n";
-      }
-
+      const stepsSection = details?.steps.length ? `\n${formatStepsTimeline(details.steps)}\n` : "";
       const stepsInfo = details
-        ? `- **Total de Steps:** ${details.totalSteps} steps (${details.userTurns} turno${details.userTurns !== 1 ? "s" : ""})\n`
+        ? `- **Total de Steps:** ${details.totalSteps} steps (${details.userTurns} turno${
+            details.userTurns !== 1 ? "s" : ""
+          })\n`
         : "";
-
       return {
         handled: true,
         response: `✅ **Sessão retomada com sucesso!**\n\n- **Conversation ID:** \`${resolvedConvId}\`\n${stepsInfo}- **Modelo Ativo:** \`${session.model}\`\n${stepsSection}---\n💡 *Contexto carregado. Envie sua próxima mensagem para continuar a partir de onde parou!*`,
@@ -475,120 +418,42 @@ export async function executeSlashCommand(
     }
 
     case "usage":
-    case "quota": {
+    case "quota":
       try {
-        const { stdout, stderr } = await execFileAsync(binaryPath, ["--print", "/usage"], {
-          cwd: session.cwd,
-        });
-        const output = stdout.trim() || stderr.trim();
-        return {
-          handled: true,
-          response: formatUsageOutput(output),
-        };
+        return { handled: true, response: formatUsageOutput(await runAgySlash(binaryPath, session.cwd, "/usage")) };
       } catch (err) {
-        return {
-          handled: true,
-          response: `Erro ao obter uso de quota: ${(err as Error).message}`,
-        };
+        return { handled: true, response: `Erro ao obter uso de quota: ${(err as Error).message}` };
       }
-    }
-
-    case "credits": {
+    case "credits":
       try {
-        const { stdout, stderr } = await execFileAsync(binaryPath, ["--print", "/credits"], {
-          cwd: session.cwd,
-        });
-        const output = stdout.trim() || stderr.trim();
-        return {
-          handled: true,
-          response: `### 💳 Saldo de Créditos Antigravity\n\n\`\`\`text\n${output}\n\`\`\``,
-        };
+        return { handled: true, response: `### 💳 Saldo de Créditos Antigravity\n\n\`\`\`text\n${await runAgySlash(binaryPath, session.cwd, "/credits")}\n\`\`\`` };
       } catch (err) {
-        return {
-          handled: true,
-          response: `Erro ao consultar créditos: ${(err as Error).message}`,
-        };
+        return { handled: true, response: `Erro ao consultar créditos: ${(err as Error).message}` };
       }
-    }
-
-    case "skills": {
+    case "skills":
       try {
-        const { stdout, stderr } = await execFileAsync(binaryPath, ["--print", "/skills"], {
-          cwd: session.cwd,
-        });
-        const output = stdout.trim() || stderr.trim();
-        return {
-          handled: true,
-          response: `### 🛠️ Skills Instaladas\n\n\`\`\`text\n${output}\n\`\`\``,
-        };
+        return { handled: true, response: `### 🛠️ Skills Instaladas\n\n\`\`\`text\n${await runAgySlash(binaryPath, session.cwd, "/skills")}\n\`\`\`` };
       } catch (err) {
-        return {
-          handled: true,
-          response: `Erro ao listar skills: ${(err as Error).message}`,
-        };
+        return { handled: true, response: `Erro ao listar skills: ${(err as Error).message}` };
       }
-    }
-
-    case "agents": {
+    case "agents":
       try {
-        const { stdout, stderr } = await execFileAsync(binaryPath, ["--print", "/agents"], {
-          cwd: session.cwd,
-        });
-        const output = stdout.trim() || stderr.trim();
-        return {
-          handled: true,
-          response: `### 🤖 Agentes Disponíveis\n\n\`\`\`text\n${output}\n\`\`\``,
-        };
+        return { handled: true, response: `### 🤖 Agentes Disponíveis\n\n\`\`\`text\n${await runAgySlash(binaryPath, session.cwd, "/agents")}\n\`\`\`` };
       } catch (err) {
-        return {
-          handled: true,
-          response: `Erro ao listar agentes: ${(err as Error).message}`,
-        };
+        return { handled: true, response: `Erro ao listar agentes: ${(err as Error).message}` };
       }
-    }
-
-    case "changelog": {
+    case "changelog":
       try {
-        const { stdout, stderr } = await execFileAsync(binaryPath, ["--print", "/changelog"], {
-          cwd: session.cwd,
-        });
-        const output = stdout.trim() || stderr.trim();
-        return {
-          handled: true,
-          response: `### 📜 Notas de Atualização (Changelog)\n\n${output}`,
-        };
+        return { handled: true, response: `### 📜 Notas de Atualização (Changelog)\n\n${await runAgySlash(binaryPath, session.cwd, "/changelog")}` };
       } catch (err) {
-        return {
-          handled: true,
-          response: `Erro ao buscar changelog: ${(err as Error).message}`,
-        };
+        return { handled: true, response: `Erro ao buscar changelog: ${(err as Error).message}` };
       }
-    }
-
-    case "help": {
-      let help = "### 📖 Comandos Disponíveis no Antigravity (Paseo)\n\n";
-      help += "| Comando | Descrição |\n";
-      help += "|:---|:---|\n";
-      help +=
-        "| `/resume` | Lista as últimas 10 sessões disponíveis para retomada |\n";
-      help +=
-        "| `/resume <id>` | Retoma o histórico completo da sessão especificada |\n";
-      help +=
-        "| `/usage` | Exibe o consumo e cotas restantes (Gemini, Claude, GPT) |\n";
-      help +=
-        "| `/credits` | Exibe o saldo de créditos G1 |\n";
-      help +=
-        "| `/skills` | Lista as skills instaladas no ambiente |\n";
-      help +=
-        "| `/agents` | Lista os tipos de agentes configurados |\n";
-      help +=
-        "| `/changelog` | Exibe as notas de versão do Antigravity |\n";
-      help +=
-        "| `/help` | Exibe este painel de ajuda |\n";
-
-      return { handled: true, response: help };
-    }
-
+    case "help":
+      return {
+        handled: true,
+        response:
+          "### 📖 Comandos Disponíveis no Antigravity (Paseo)\n\n| Comando | Descrição |\n|:---|:---|\n| `/resume` | Lista as últimas 10 sessões disponíveis para retomada |\n| `/resume <id>` | Retoma e valida a sessão especificada |\n| `/usage` | Exibe o consumo e cotas restantes (Gemini, Claude, GPT) |\n| `/credits` | Exibe o saldo de créditos G1 |\n| `/skills` | Lista as skills instaladas no ambiente |\n| `/agents` | Lista os tipos de agentes configurados |\n| `/changelog` | Exibe as notas de versão do Antigravity |\n| `/help` | Exibe este painel de ajuda |\n",
+      };
     default:
       return { handled: false };
   }

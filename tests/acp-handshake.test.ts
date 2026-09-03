@@ -13,15 +13,12 @@ describe("ACP Handshake & Protocol", () => {
     clientInput = new PassThrough();
     clientOutput = new PassThrough();
     responses = [];
-
     clientOutput.setEncoding("utf-8");
     clientOutput.on("data", (chunk: string) => {
-      const lines = chunk.split("\n").filter((l) => l.trim().length > 0);
-      for (const line of lines) {
+      for (const line of chunk.split("\n").filter((value) => value.trim())) {
         responses.push(JSON.parse(line));
       }
     });
-
     server = new ACPServer({
       input: clientInput,
       output: clientOutput,
@@ -41,14 +38,14 @@ describe("ACP Handshake & Protocol", () => {
   async function waitForResponse(id: number, timeoutMs = 2000): Promise<any> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      const res = responses.find((r) => r.id === id);
-      if (res) return res;
+      const response = responses.find((item) => item.id === id);
+      if (response) return response;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     throw new Error(`Timeout waiting for RPC response id=${id}`);
   }
 
-  it("should respond to initialize with server capabilities and info", async () => {
+  it("advertises resume without falsely advertising loadSession replay", async () => {
     sendRpc({
       jsonrpc: "2.0",
       id: 1,
@@ -59,17 +56,15 @@ describe("ACP Handshake & Protocol", () => {
       },
     });
 
-    const res = await waitForResponse(1);
-    expect(res.id).toBe(1);
-    expect(res.jsonrpc).toBe("2.0");
-    expect(res.result.serverInfo.name).toBe("agy-acp");
-    expect(res.result.serverInfo.version).toBe("1.0.0");
-    expect(res.result.protocolVersion).toBe("1.0.0");
-    expect(res.result.agentCapabilities.loadSession).toBe(true);
-    expect(res.result.agentCapabilities.sessionCapabilities.resume).toBe(true);
+    const response = await waitForResponse(1);
+    expect(response.result.serverInfo.name).toBe("agy-acp");
+    expect(response.result.serverInfo.version).toBe("1.0.0");
+    expect(response.result.protocolVersion).toBe("1.0.0");
+    expect(response.result.agentCapabilities.loadSession).toBe(false);
+    expect(response.result.agentCapabilities.sessionCapabilities.resume).toBe(true);
   });
 
-  it("should respond to session/new with new session ID and available modes/models", async () => {
+  it("returns session state and command metadata from session/new", async () => {
     sendRpc({
       jsonrpc: "2.0",
       id: 2,
@@ -80,26 +75,33 @@ describe("ACP Handshake & Protocol", () => {
       },
     });
 
-    const res = await waitForResponse(2);
-    expect(res.id).toBe(2);
-    expect(res.result.sessionId).toBeDefined();
-    expect(res.result.modes.availableModes.length).toBeGreaterThan(0);
-    expect(res.result.models.availableModels.length).toBeGreaterThan(0);
-    expect(res.result.configOptions).toBeDefined();
-    expect(res.result.configOptions[0].category).toBe("thought_level");
+    const response = await waitForResponse(2);
+    expect(response.result.sessionId).toBeDefined();
+    expect(response.result.modes.availableModes.length).toBeGreaterThan(0);
+    expect(response.result.models.availableModels.length).toBeGreaterThan(0);
+    expect(response.result.configOptions[0].category).toBe("thought_level");
+
+    const commands = responses.find(
+      (item) => item.method === "session/update" && item.params?.update?.sessionUpdate === "available_commands_update"
+    );
+    expect(commands).toBeDefined();
   });
 
-  it("should return method not found for unknown methods", async () => {
+  it("rejects session/load until history replay is implemented", async () => {
     sendRpc({
       jsonrpc: "2.0",
-      id: 99,
-      method: "unknown/method",
-      params: {},
+      id: 3,
+      method: "session/load",
+      params: { sessionId: "anything", cwd: "/tmp", mcpServers: [] },
     });
+    const response = await waitForResponse(3);
+    expect(response.error.code).toBe(-32601);
+    expect(response.error.message).toContain("session/load");
+  });
 
-    const res = await waitForResponse(99);
-    expect(res.id).toBe(99);
-    expect(res.error).toBeDefined();
-    expect(res.error.code).toBe(-32601);
+  it("returns method not found for unknown methods", async () => {
+    sendRpc({ jsonrpc: "2.0", id: 99, method: "unknown/method", params: {} });
+    const response = await waitForResponse(99);
+    expect(response.error.code).toBe(-32601);
   });
 });

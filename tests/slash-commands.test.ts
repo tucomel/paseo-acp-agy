@@ -5,14 +5,12 @@ import {
   listRecentConversations,
   formatUsageOutput,
   formatStepsTimeline,
-  getConversationSteps,
   ConversationStepItem,
 } from "../src/slash-commands.js";
 import { Session } from "../src/session.js";
 
 describe("Slash Commands Handler", () => {
   const dummySession = new Session({
-    id: "test-session-slash",
     cwd: process.cwd(),
     model: "gemini-3.7-flash",
     effort: "high",
@@ -38,14 +36,16 @@ describe("Slash Commands Handler", () => {
     expect(result.response).toContain("/help");
   });
 
-  it("should handle /resume without arguments by listing recent conversations with steps", async () => {
+  it("should handle /resume without arguments in both empty and populated histories", async () => {
+    const recent = listRecentConversations(1);
     const result = await executeSlashCommand("/resume", dummySession, "agy");
     expect(result.handled).toBe(true);
-    expect(result.response).toContain("Sessões Recentes");
-    // If conversations exist in brain, should mention steps
-    const recent = listRecentConversations(1);
-    if (recent.length > 0 && recent[0].totalSteps > 0) {
-      expect(result.response).toContain("steps");
+
+    if (recent.length === 0) {
+      expect(result.response).toContain("Nenhuma sessão anterior");
+    } else {
+      expect(result.response).toContain("Sessões Recentes");
+      if (recent[0].totalSteps > 0) expect(result.response).toContain("steps");
     }
   });
 
@@ -103,8 +103,8 @@ describe("Slash Commands Handler", () => {
     expect(formatted).toContain("Quotas de Uso");
     expect(formatted).toContain("Google Gemini");
     expect(formatted).toContain("Claude & GPT");
-    expect(formatted).toContain("█"); // Progress bar character
-    expect(formatted).toContain("🟢"); // Status badge
+    expect(formatted).toContain("█");
+    expect(formatted).toContain("🟢");
     expect(formatted).toContain("Semanal");
     expect(formatted).toContain("5 Horas");
   });

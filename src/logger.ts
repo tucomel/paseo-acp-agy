@@ -48,7 +48,7 @@ export function sanitize(data: unknown): unknown {
     }
     const clean: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(data)) {
-      if (/token|secret|password|cookie|credential|authorization|api[_-]?key/i.test(k)) {
+      if (/token|secret|password|auth|cookie|credential|authorization|api[_-]?key/i.test(k)) {
         clean[k] = typeof v === "object" && v !== null ? sanitize(v) : "[REDACTED]";
       } else {
         clean[k] = sanitize(v);
@@ -76,7 +76,6 @@ export class Logger {
 
     this.logFilePath = path.join(dir, "agy-acp.log");
     try {
-      // Ensure file exists with 0600 mode
       if (!fs.existsSync(this.logFilePath)) {
         fs.writeFileSync(this.logFilePath, "", { mode: 0o600 });
       } else {
