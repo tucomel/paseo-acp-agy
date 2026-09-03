@@ -148,16 +148,32 @@ export class ACPServer {
       input_tokens?: number;
       output_tokens?: number;
       cache_read_tokens?: number;
+      thinking_tokens?: number;
+      total_tokens?: number;
     },
     executingModel?: string
   ) {
+    const input = turnUsage?.input_tokens ?? 0;
+    const output = turnUsage?.output_tokens ?? 0;
+    const cached = turnUsage?.cache_read_tokens ?? 0;
+    const thought = turnUsage?.thinking_tokens;
+    const total = turnUsage?.total_tokens ?? (input + output);
+    const maxTokens = getModelContextWindow(executingModel || session.model);
+    const usedTokens = session.usage.contextWindowUsedTokens;
+    const costUsd = roundUsageCostUsd(session.usage.totalCostUsd);
+
     return {
-      inputTokens: turnUsage?.input_tokens ?? 0,
-      outputTokens: turnUsage?.output_tokens ?? 0,
-      cachedReadTokens: turnUsage?.cache_read_tokens ?? 0,
-      totalCostUsd: roundUsageCostUsd(session.usage.totalCostUsd),
-      contextWindowMaxTokens: getModelContextWindow(executingModel || session.model),
-      contextWindowUsedTokens: session.usage.contextWindowUsedTokens,
+      inputTokens: input,
+      outputTokens: output,
+      cachedReadTokens: cached,
+      ...(thought !== undefined ? { thoughtTokens: thought } : {}),
+      totalTokens: total,
+      totalCostUsd: costUsd,
+      cost: { amount: costUsd, currency: "USD" },
+      size: maxTokens,
+      used: usedTokens,
+      contextWindowMaxTokens: maxTokens,
+      contextWindowUsedTokens: usedTokens,
     };
   }
 
@@ -186,12 +202,14 @@ export class ACPServer {
           const clientInfo = (params.clientInfo || {}) as { name?: string; version?: string };
           logger.info("ACP Client connected", { clientInfo });
           if (!isNotification) {
+            const shortVersion = getShortVersion();
             this.sendSuccess(id, {
-              protocolVersion: "1.0.0",
-              serverInfo: { name: "agy-acp", version: getShortVersion() },
+              protocolVersion: 1,
+              agentInfo: { name: "agy-acp", version: shortVersion },
+              serverInfo: { name: "agy-acp", version: shortVersion },
               agentCapabilities: {
                 loadSession: false,
-                sessionCapabilities: { resume: true },
+                sessionCapabilities: { resume: {} },
               },
             });
           }
@@ -389,17 +407,30 @@ export class ACPServer {
                   step.usage.output_tokens || 0,
                   step.usage.cache_read_tokens || 0
                 );
+                const inputTokens = step.usage.input_tokens ?? 0;
+                const outputTokens = step.usage.output_tokens ?? 0;
+                const cachedReadTokens = step.usage.cache_read_tokens ?? 0;
+                const thoughtTokens = step.usage.thinking_tokens;
+                const totalTokens = step.usage.total_tokens ?? (inputTokens + outputTokens);
+                const totalCostUsd = roundUsageCostUsd(session.usage.totalCostUsd + turnCost);
+                const contextWindowMaxTokens = getModelContextWindow(executingModel);
+                const contextWindowUsedTokens = inputTokens + outputTokens;
+
                 this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                   sessionId: session.id,
                   update: {
                     sessionUpdate: "usage_update",
-                    inputTokens: step.usage.input_tokens,
-                    outputTokens: step.usage.output_tokens,
-                    cachedReadTokens: step.usage.cache_read_tokens,
-                    totalCostUsd: roundUsageCostUsd(session.usage.totalCostUsd + turnCost),
-                    contextWindowMaxTokens: getModelContextWindow(executingModel),
-                    contextWindowUsedTokens:
-                      (step.usage.input_tokens || 0) + (step.usage.output_tokens || 0),
+                    size: contextWindowMaxTokens,
+                    used: contextWindowUsedTokens,
+                    cost: { amount: totalCostUsd, currency: "USD" },
+                    inputTokens,
+                    outputTokens,
+                    cachedReadTokens,
+                    ...(thoughtTokens !== undefined ? { thoughtTokens } : {}),
+                    totalTokens,
+                    totalCostUsd,
+                    contextWindowMaxTokens,
+                    contextWindowUsedTokens,
                   },
                 });
               }

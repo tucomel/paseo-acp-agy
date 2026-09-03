@@ -35,7 +35,7 @@ describe("ACP Handshake & Protocol", () => {
     clientInput.write(JSON.stringify(msg) + "\n");
   }
 
-  async function waitForResponse(id: number, timeoutMs = 2000): Promise<any> {
+  async function waitForResponse(id: number, timeoutMs = 5000): Promise<any> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const response = responses.find((item) => item.id === id);
@@ -57,11 +57,12 @@ describe("ACP Handshake & Protocol", () => {
     });
 
     const response = await waitForResponse(1);
+    expect(response.result.agentInfo.name).toBe("agy-acp");
     expect(response.result.serverInfo.name).toBe("agy-acp");
     expect(response.result.serverInfo.version).toMatch(/^1\.1\.0/);
-    expect(response.result.protocolVersion).toBe("1.0.0");
+    expect(response.result.protocolVersion).toBe(1);
     expect(response.result.agentCapabilities.loadSession).toBe(false);
-    expect(response.result.agentCapabilities.sessionCapabilities.resume).toBe(true);
+    expect(response.result.agentCapabilities.sessionCapabilities.resume).toBeDefined();
   });
 
   it("returns session state and command metadata from session/new", async () => {

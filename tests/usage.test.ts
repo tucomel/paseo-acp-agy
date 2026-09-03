@@ -261,6 +261,9 @@ Claude and GPT models\tFive Hour Limit Remaining\t20%\t2026-09-03T06:21:47Z
       expect(session.usage.outputTokens).toBe(100);
       expect(session.usage.totalCostUsd).toBeGreaterThan(0);
       expect(response.result.usage.totalCostUsd).toBeGreaterThan(0);
+      expect(response.result.usage.totalTokens).toBe(4_100);
+      expect(response.result.usage.size).toBe(1_048_576);
+      expect(response.result.usage.used).toBe(4_100);
       await harness.server.stop();
     });
 
@@ -311,9 +314,70 @@ Claude and GPT models\tFive Hour Limit Remaining\t20%\t2026-09-03T06:21:47Z
       );
       expect(streamingUsage.params.update.totalCostUsd).toBeCloseTo(0.1, 6);
       expect(streamingUsage.params.update.contextWindowMaxTokens).toBe(1_048_576);
+      expect(streamingUsage.params.update.size).toBe(1_048_576);
+      expect(streamingUsage.params.update.used).toBe(1_000_000);
+      expect(streamingUsage.params.update.totalTokens).toBe(1_000_000);
 
       // Final response payload must also reflect the executing model's context limit
       expect(response.result.usage.contextWindowMaxTokens).toBe(1_048_576);
+      expect(response.result.usage.totalTokens).toBe(1_000_000);
+      expect(response.result.usage.size).toBe(1_048_576);
+      expect(response.result.usage.used).toBe(1_000_000);
+      await harness.server.stop();
+    });
+
+    it("ensures all emitted ACP usage notifications and prompt responses strictly conform to ACP SDK schemas", async () => {
+      const { zSessionNotification, zPromptResponse } = await import(
+        "@agentclientprotocol/sdk/dist/schema/zod.gen.js"
+      );
+
+      const store = new SessionStore(path.join(tempDir, "schema-sessions"));
+      const manager = new SessionManager({ store });
+      const session = manager.createSession({ cwd: tempDir, model: "gemini-3.7-flash" });
+
+      vi.spyOn(session.process, "sendPrompt").mockImplementation(async (_text, onStepUpdate) => {
+        onStepUpdate?.({
+          event: "step_update",
+          step_update: {
+            conversation_id: "823fb330-71e5-43b9-9efd-d9b7323e4b94",
+            step_index: 1,
+            state: "ACTIVE",
+            step_type: "agent_response",
+            usage: { input_tokens: 15_000, output_tokens: 300, cache_read_tokens: 5_000 },
+          },
+        });
+        return {
+          event: "result",
+          result: {
+            conversation_id: "823fb330-71e5-43b9-9efd-d9b7323e4b94",
+            status: "SUCCESS",
+            response: "done",
+            usage: { input_tokens: 15_000, output_tokens: 300, cache_read_tokens: 5_000 },
+          },
+        };
+      });
+
+      const harness = makeRpcHarness(manager);
+      harness.send({
+        jsonrpc: "2.0",
+        id: 10,
+        method: "session/prompt",
+        params: { sessionId: session.id, prompt: "test schema validation" },
+      });
+      const response = await harness.waitForResponse(10);
+
+      // Verify prompt response validates cleanly against ACP schema
+      const promptParsed = zPromptResponse.safeParse(response.result);
+      expect(promptParsed.success).toBe(true);
+
+      // Verify usage_update notification validates cleanly against ACP schema
+      const usageNotification = harness.messages.find(
+        (msg) => msg.params?.update?.sessionUpdate === "usage_update"
+      );
+      expect(usageNotification).toBeDefined();
+      const notificationParsed = zSessionNotification.safeParse(usageNotification.params);
+      expect(notificationParsed.success).toBe(true);
+
       await harness.server.stop();
     });
   });
