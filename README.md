@@ -98,11 +98,43 @@ To include `paseo-acp-agy` in Paseo's built-in provider store (`ACP_PROVIDER_CAT
 
 ---
 
+## Security, Permissions & Antigravity CLI Limitations
+
+In the Agent Client Protocol (ACP) specification, the host client (e.g., [Paseo](https://paseo.sh) or Zed) acts as the security supervisor. Native ACP agents query the host via `session/request_permission` before executing tools (`read_file`, `write_file`, terminal commands).
+
+### Why `--dangerously-skip-permissions` is enabled by default
+
+The official Google Antigravity CLI (`agy`) communicates with this adapter via `--input-format stream-json --output-format stream-json`:
+1. **No Interactive TTY**: `agy` runs headlessly over piped JSON-RPC stdio. In this mode, `agy`'s internal terminal prompt (`Allow <tool>? [y/n]`) cannot reach an interactive user.
+2. **Headless Permission Denials**: Without `--dangerously-skip-permissions`, whenever `agy` accesses a workspace folder or runs a tool that has not been explicitly pre-approved in `~/.gemini/antigravity-cli/settings.json`, its internal check fails and aborts immediately with:
+   ```text
+   permission check failed for read_file: user denied permission for read_file(...)
+   ```
+3. **No External Permission Callback**: Unlike native ACP agents or Claude's Agent SDK, `agy`'s `stream-json` interface does not support an external pause-and-confirm handshake. Once a tool step starts in `agy`, it has already been scheduled internally.
+
+To prevent unrecoverable `user denied permission` errors on fresh workspaces (especially on new Windows or Linux installations), `paseo-acp-agy`:
+- Passes `--dangerously-skip-permissions` by default so tool authorization is delegated to the host application.
+- Passes `--add-dir <cwd>` on process startup to demarcate the current project workspace directory.
+- Streams tool invocations (`step_update` → `tool_call`) in real time to the Paseo UI so the user retains full visibility over all actions.
+
+### Controlling Permissions & Sandbox Mode
+
+You can adjust this behavior using environment variables in your Paseo configuration or shell:
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS` | Set to `false` or `0` to disable automatic skip and strictly require pre-approved permissions in `~/.gemini/antigravity-cli/settings.json` | `true` |
+| `AGY_ACP_SANDBOX` | Set to `true` or `1` to launch `agy` with terminal restrictions enabled (`--sandbox`) | `false` |
+
+---
+
 ## Environment Variables
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `AGY_BIN_PATH` | Path to the Google Antigravity binary | Auto-detected from `PATH` or `~/.local/bin/agy` |
+| `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS` | Auto-approve tool permissions in headless `agy` | `true` |
+| `AGY_ACP_SANDBOX` | Enable terminal sandbox mode (`--sandbox`) | `false` |
 | `AGY_ACP_LOG_FILE` | Enable debug file logging | Disabled |
 
 ---

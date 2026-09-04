@@ -10,14 +10,15 @@ Each Paseo ACP session owns one persistent `agy` process:
 agy --input-format stream-json --output-format stream-json --print=""
 ```
 
-Optional session flags are applied when the process starts or is restarted:
+Session flags applied when the process starts or is restarted:
 
 - `--model <model-id>`
 - `--effort <low|medium|high>` when supported by the selected model
 - `--mode <mode-id>`
 - `--conversation <conversation-id>` when resuming
-- `--sandbox`
-- `--dangerously-skip-permissions` only when explicitly configured
+- `--add-dir <cwd>` registering the active workspace directory
+- `--dangerously-skip-permissions` (enabled by default under ACP; see Permission Model)
+- `--sandbox` when configured via `AGY_ACP_SANDBOX=1`
 
 Configuration changes schedule a controlled restart before the next prompt. On POSIX systems `agy` is launched as a process-group leader; shutdown, restart and turn cancellation signal the process group so tool subprocesses are not left orphaned.
 
@@ -68,6 +69,27 @@ For backwards compatibility, the server also accepts the exact pre-hardening ali
 ### `session/load`
 
 `agy-acp` currently advertises `loadSession: false`. ACP `session/load` requires the agent to replay prior conversation history through `session/update` notifications. The adapter intentionally does not claim that capability until replay is implemented. Paseo persistence uses `session/resume`, which restores model context without replaying already-rendered history.
+
+## Permission Model & CLI Limitations
+
+In the standard ACP specification, clients like Paseo or Zed act as supervisors: an agent requests authorization for actions via `session/request_permission`, and the client presents prompts to the user or evaluates auto-accept policies.
+
+### The Antigravity headless stream-json constraint
+
+The official Antigravity CLI (`agy`) was created as a terminal-interactive CLI rather than a native ACP server:
+1. **Piped Stdio vs. Interactive TTY**: `agy` runs headlessly over JSON-RPC stdio pipes. In this mode, `agy`'s internal TTY consent prompts (`Allow <tool>? [y/n]`) cannot query the user.
+2. **Immediate Denial on Non-Interactive Stdin**: Without `--dangerously-skip-permissions`, whenever `agy` invokes a tool (`read_file`, `write_file`, shell execution) in a workspace path that has not been manually pre-trusted in `~/.gemini/antigravity-cli/settings.json`, it immediately fails with:
+   `permission check failed for <tool>: user denied permission for <tool>(<path>)`.
+3. **Absence of a Protocol-Level Permission Callback**: The `agy stream-json` protocol currently lacks an inbound pause-and-resume event (such as `permission_response`). By the time `agy` outputs a `step_update` event with `step_type: "tool"` and `state: "ACTIVE"`, execution has already been initiated by the binary.
+
+### How `agy-acp` resolves this
+
+- **Delegated Trust**: `agy-acp` applies `--dangerously-skip-permissions` by default for ACP sessions so the underlying CLI does not fail on headless stdin prompts.
+- **Workspace Demarcation**: `agy-acp` passes `--add-dir <cwd>` on startup to explicitly register the current working directory in Antigravity's workspace context.
+- **Live Tool Streaming**: Tool calls are mapped and streamed immediately via `session/update` (`tool_call` and `tool_call_update`) so Paseo provides real-time auditability of actions and outputs.
+- **Opt-out & Sandbox**: Users can customize this behavior:
+  - Setting `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS=false` disables `--dangerously-skip-permissions` for environments where `~/.gemini/antigravity-cli/settings.json` is strictly maintained.
+  - Setting `AGY_ACP_SANDBOX=true` adds `--sandbox` to enable terminal execution restrictions.
 
 ## Turn concurrency and cancellation
 
