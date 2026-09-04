@@ -1,6 +1,6 @@
 {
   "name": "paseo-acp-agy",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "ACP (Agent Client Protocol) provider for Google Antigravity in Paseo and Zed",
   "type": "module",
   "main": "dist/index.js",
