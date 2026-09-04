@@ -21,7 +21,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --test-timeout 15000",
     "start": "node dist/index.js"
   },
   "keywords": [

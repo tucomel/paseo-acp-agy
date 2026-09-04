@@ -5,7 +5,20 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export const SEMVER_VERSION = "1.1.0";
+function getPackageVersion(): string {
+  try {
+    const pkgPath = path.resolve(__dirname, "..", "package.json");
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      if (pkg.version) return pkg.version;
+    }
+  } catch {
+    // ignore
+  }
+  return "1.1.0";
+}
+
+export const SEMVER_VERSION = getPackageVersion();
 
 export interface BuildMetadata {
   version: string;
