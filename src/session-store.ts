@@ -44,7 +44,9 @@ export class SessionStore {
     this.dir = dir || path.join(getStateRoot(), "sessions");
     try {
       fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-      fs.chmodSync(this.dir, 0o700);
+      if (process.platform !== "win32") {
+        fs.chmodSync(this.dir, 0o700);
+      }
     } catch {}
   }
 
@@ -82,8 +84,13 @@ export class SessionStore {
         mode: 0o600,
         flag: "wx",
       });
+      if (process.platform === "win32" && fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
       fs.renameSync(tempPath, filePath);
-      fs.chmodSync(filePath, 0o600);
+      if (process.platform !== "win32") {
+        fs.chmodSync(filePath, 0o600);
+      }
     } catch (err) {
       try {
         fs.rmSync(tempPath, { force: true });

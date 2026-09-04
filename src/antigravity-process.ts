@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { logger } from "./logger.js";
 import {
@@ -11,13 +12,26 @@ import {
   AgyStreamInputUserMessage,
   getEffectiveEffortForModel,
 } from "./protocol.js";
-import { buildAgyArgs, PermissionSettings } from "./permissions.js";
+import { buildAgyArgs, PermissionSettings, resolvePermissionSettings } from "./permissions.js";
 
 function resolveDefaultAgyBinary(): string {
   if (process.env.AGY_BIN_PATH) return process.env.AGY_BIN_PATH;
-  if (process.env.HOME) {
-    const localPath = path.join(process.env.HOME, ".local", "bin", "agy");
-    if (fs.existsSync(localPath)) return localPath;
+  const home = os.homedir();
+  if (home) {
+    if (process.platform === "win32") {
+      const candidates = [
+        path.join(home, ".local", "bin", "agy.exe"),
+        path.join(home, "AppData", "Local", "Programs", "antigravity", "agy.exe"),
+        path.join(home, ".local", "bin", "agy.cmd"),
+        path.join(home, ".local", "bin", "agy.bat"),
+      ];
+      for (const cand of candidates) {
+        if (fs.existsSync(cand)) return cand;
+      }
+    } else {
+      const localPath = path.join(home, ".local", "bin", "agy");
+      if (fs.existsSync(localPath)) return localPath;
+    }
   }
   return "agy";
 }
@@ -65,7 +79,7 @@ export class AntigravityProcess extends EventEmitter {
     this.effort = options.effort;
     this.mode = options.mode;
     this.conversationId = options.conversationId;
-    this.permissions = options.permissions || { sandbox: false, dangerouslySkipPermissions: false };
+    this.permissions = options.permissions || resolvePermissionSettings();
     this.env = { ...process.env, ...options.env };
 
     // EventEmitter treats "error" specially. Keep a defensive listener for
@@ -247,11 +261,17 @@ export class AntigravityProcess extends EventEmitter {
     if (effectiveEffort) extraArgs.push("--effort", effectiveEffort);
     if (this.conversationId) extraArgs.push("--conversation", this.conversationId);
 
+    const addDirs = [...(this.permissions.addDirs || [])];
+    if (this.cwd && !addDirs.includes(this.cwd)) {
+      addDirs.push(this.cwd);
+    }
+
     const args = buildAgyArgs(
       {
         sandbox: this.permissions.sandbox,
         dangerouslySkipPermissions: this.permissions.dangerouslySkipPermissions,
         mode: this.mode,
+        addDirs,
       },
       extraArgs
     );

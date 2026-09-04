@@ -1,5 +1,6 @@
 import { execSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,15 +49,37 @@ function resolveAgyInfo(): { version: string; binaryPath: string } {
   let binaryPath = process.env.AGY_BIN_PATH;
   if (!binaryPath) {
     try {
-      binaryPath = execSync("which agy 2>/dev/null || command -v agy 2>/dev/null", { encoding: "utf8" }).trim();
+      const lookupCmd =
+        process.platform === "win32"
+          ? "where.exe agy"
+          : "which agy 2>/dev/null || command -v agy 2>/dev/null";
+      const output = execSync(lookupCmd, { encoding: "utf8" }).trim();
+      if (output) {
+        binaryPath = output.split(/\r?\n/)[0].trim();
+      }
     } catch {
       // ignore
     }
   }
-  if (!binaryPath && process.env.HOME) {
-    const defaultLocalPath = path.join(process.env.HOME, ".local", "bin", "agy");
-    if (fs.existsSync(defaultLocalPath)) {
-      binaryPath = defaultLocalPath;
+  if (!binaryPath) {
+    const homeDir = os.homedir();
+    if (homeDir) {
+      const candidates =
+        process.platform === "win32"
+          ? [
+              path.join(homeDir, ".local", "bin", "agy.exe"),
+              path.join(homeDir, "AppData", "Local", "Programs", "antigravity", "agy.exe"),
+              path.join(homeDir, ".local", "bin", "agy.cmd"),
+              path.join(homeDir, ".local", "bin", "agy.bat"),
+            ]
+          : [path.join(homeDir, ".local", "bin", "agy")];
+
+      for (const cand of candidates) {
+        if (fs.existsSync(cand)) {
+          binaryPath = cand;
+          break;
+        }
+      }
     }
   }
   if (!binaryPath) binaryPath = "agy";

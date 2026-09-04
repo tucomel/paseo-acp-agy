@@ -16,7 +16,9 @@ function getAttachmentsDir(): string {
   const attachmentsDir = path.join(getStateRoot(), "attachments");
   try {
     fs.mkdirSync(attachmentsDir, { recursive: true, mode: 0o700 });
-    fs.chmodSync(attachmentsDir, 0o700);
+    if (process.platform !== "win32") {
+      fs.chmodSync(attachmentsDir, 0o700);
+    }
   } catch {}
   return attachmentsDir;
 }
@@ -94,7 +96,9 @@ export function saveBase64Image(data: string, mimeType = "image/png"): string | 
   if (!fs.existsSync(filePath)) {
     try {
       fs.writeFileSync(filePath, buffer, { mode: 0o600, flag: "wx" });
-      fs.chmodSync(filePath, 0o600);
+      if (process.platform !== "win32") {
+        fs.chmodSync(filePath, 0o600);
+      }
       logger.info("Saved attached image for session", { filePath, sizeBytes: buffer.length });
     } catch (err) {
       if (!fs.existsSync(filePath)) {
