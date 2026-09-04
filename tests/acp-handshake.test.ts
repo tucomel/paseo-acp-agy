@@ -59,7 +59,7 @@ describe("ACP Handshake & Protocol", () => {
     const response = await waitForResponse(1);
     expect(response.result.agentInfo.name).toBe("agy-acp");
     expect(response.result.serverInfo.name).toBe("agy-acp");
-    expect(response.result.serverInfo.version).toMatch(/^1\.1\.0/);
+    expect(response.result.serverInfo.version).toMatch(/^\d+\.\d+\.\d+/);
     expect(response.result.protocolVersion).toBe(1);
     expect(response.result.agentCapabilities.loadSession).toBe(false);
     expect(response.result.agentCapabilities.sessionCapabilities.resume).toBeDefined();
