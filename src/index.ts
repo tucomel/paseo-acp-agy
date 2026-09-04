@@ -16,7 +16,26 @@ if (args.includes("--version") || args.includes("-v")) {
 }
 
 if (args.includes("--help") || args.includes("-h")) {
-  process.stdout.write(`agy-acp - ACP adapter for Google Antigravity CLI\n\nUsage:\n  agy-acp [options]\n\nOptions:\n  -v, --version  Show version\n  -h, --help     Show help\n\nEnvironment Variables:\n  AGY_ACP_LOG_LEVEL                 debug | info | warn | error (default: info)\n  AGY_ACP_LOG_DIR                   Directory for log files\n  AGY_ACP_SANDBOX                   Set to 'true' to run agy in sandbox mode\n  AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS Set to 'true' to auto-approve tool permissions\n  AGY_BIN_PATH                      Path to agy binary (default: /home/ubuntu/.local/bin/agy)\n`);
+  process.stdout.write(`paseo-acp-agy - ACP adapter for Google Antigravity CLI
+
+Usage:
+  paseo-acp-agy [options]
+  agy-acp [options]
+  npx -y paseo-acp-agy [options]
+
+Options:
+  --acp          Start ACP server over stdio (default)
+  -v, --version  Show version
+  --json         Show version in JSON format (with --version)
+  -h, --help     Show help
+
+Environment Variables:
+  AGY_ACP_LOG_LEVEL                 debug | info | warn | error (default: info)
+  AGY_ACP_LOG_DIR                   Directory for log files
+  AGY_ACP_SANDBOX                   Set to 'true' to run agy in sandbox mode
+  AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS Set to 'true' to auto-approve tool permissions
+  AGY_BIN_PATH                      Path to agy binary (default: agy in PATH or ~/.local/bin/agy)
+`);
   process.exit(0);
 }
 

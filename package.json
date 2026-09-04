@@ -9,6 +9,15 @@
     "paseo-acp-agy": "./dist/index.js",
     "agy-acp": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "PROTOCOL.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",

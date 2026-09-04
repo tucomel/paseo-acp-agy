@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,10 +37,16 @@ function resolveAgyInfo(): { version: string; binaryPath: string } {
     try {
       binaryPath = execSync("which agy 2>/dev/null || command -v agy 2>/dev/null", { encoding: "utf8" }).trim();
     } catch {
-      binaryPath = "/home/ubuntu/.local/bin/agy";
+      // ignore
     }
   }
-  if (!binaryPath) binaryPath = "/home/ubuntu/.local/bin/agy";
+  if (!binaryPath && process.env.HOME) {
+    const defaultLocalPath = path.join(process.env.HOME, ".local", "bin", "agy");
+    if (fs.existsSync(defaultLocalPath)) {
+      binaryPath = defaultLocalPath;
+    }
+  }
+  if (!binaryPath) binaryPath = "agy";
   try {
     const version = execSync(`"${binaryPath}" --version`, {
       stdio: ["ignore", "pipe", "ignore"],

@@ -1,5 +1,7 @@
 import { spawn, ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import path from "node:path";
 import { logger } from "./logger.js";
 import {
   AgyIncomingEvent,
@@ -10,6 +12,15 @@ import {
   getEffectiveEffortForModel,
 } from "./protocol.js";
 import { buildAgyArgs, PermissionSettings } from "./permissions.js";
+
+function resolveDefaultAgyBinary(): string {
+  if (process.env.AGY_BIN_PATH) return process.env.AGY_BIN_PATH;
+  if (process.env.HOME) {
+    const localPath = path.join(process.env.HOME, ".local", "bin", "agy");
+    if (fs.existsSync(localPath)) return localPath;
+  }
+  return "agy";
+}
 
 export interface AntigravityProcessOptions {
   binaryPath?: string;
@@ -48,7 +59,7 @@ export class AntigravityProcess extends EventEmitter {
 
   constructor(options: AntigravityProcessOptions = {}) {
     super();
-    this.binaryPath = options.binaryPath || process.env.AGY_BIN_PATH || "agy";
+    this.binaryPath = options.binaryPath || resolveDefaultAgyBinary();
     this.cwd = options.cwd || process.cwd();
     this.model = options.model;
     this.effort = options.effort;

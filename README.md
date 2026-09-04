@@ -84,6 +84,10 @@ paseo run --provider antigravity "Analyze the repository architecture"
 
 Or select **Antigravity** from the provider dropdown in the Paseo Desktop App or Web UI (`https://app.paseo.sh`).
 
+### 5. Official Paseo Catalog Entry
+
+To include `paseo-acp-agy` in Paseo's built-in provider store (`ACP_PROVIDER_CATALOG`), see the [Paseo Catalog Specification](docs/paseo-catalog-entry.md).
+
 ---
 
 ## Requirements
