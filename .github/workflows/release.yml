@@ -47,7 +47,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           npm version ${{ inputs.version_type }} -m "chore(release): %s"
-          git push origin main --follow-tags
+          git push origin master --follow-tags
 
       - name: Install dependencies
         run: npm ci
