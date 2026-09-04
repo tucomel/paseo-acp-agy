@@ -1,11 +1,12 @@
 {
-  "name": "agy-acp",
+  "name": "paseo-acp-agy",
   "version": "1.1.0",
-  "description": "ACP (Agent Client Protocol) adapter for Google Antigravity CLI",
+  "description": "ACP (Agent Client Protocol) provider for Google Antigravity in Paseo and Zed",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
+    "paseo-acp-agy": "./dist/index.js",
     "agy-acp": "./dist/index.js"
   },
   "scripts": {
@@ -16,12 +17,24 @@
   },
   "keywords": [
     "acp",
+    "agent-client-protocol",
     "antigravity",
+    "google-antigravity",
     "paseo",
+    "zed",
+    "coding-agent",
     "json-rpc"
   ],
-  "author": "Entregador Online",
-  "license": "UNLICENSED",
+  "author": "Arthur Melo <https://github.com/tucomel>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tucomel/paseo-acp-agy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tucomel/paseo-acp-agy/issues"
+  },
+  "homepage": "https://github.com/tucomel/paseo-acp-agy#readme",
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.17.1"
   },

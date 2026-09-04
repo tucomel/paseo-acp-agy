@@ -31,7 +31,15 @@ function safeGit(cmd: string, cwd: string): string {
 }
 
 function resolveAgyInfo(): { version: string; binaryPath: string } {
-  const binaryPath = process.env.AGY_BIN_PATH || "/home/ubuntu/.local/bin/agy";
+  let binaryPath = process.env.AGY_BIN_PATH;
+  if (!binaryPath) {
+    try {
+      binaryPath = execSync("which agy 2>/dev/null || command -v agy 2>/dev/null", { encoding: "utf8" }).trim();
+    } catch {
+      binaryPath = "/home/ubuntu/.local/bin/agy";
+    }
+  }
+  if (!binaryPath) binaryPath = "/home/ubuntu/.local/bin/agy";
   try {
     const version = execSync(`"${binaryPath}" --version`, {
       stdio: ["ignore", "pipe", "ignore"],
@@ -47,14 +55,14 @@ function resolveAgyInfo(): { version: string; binaryPath: string } {
 export function resolveBuildMetadata(): BuildMetadata {
   if (cachedBuildMetadata) return cachedBuildMetadata;
 
-  const repoRoot = path.resolve(__dirname, "../../..");
+  const repoRoot = path.resolve(__dirname, "..");
   const gitCommitShort = safeGit("git rev-parse --short HEAD", repoRoot) || "unknown";
   const gitCommit = safeGit("git rev-parse HEAD", repoRoot) || "unknown";
   const gitBranch = safeGit("git rev-parse --abbrev-ref HEAD", repoRoot) || "unknown";
   const gitCommitDate = safeGit("git log -1 --format=%cI", repoRoot) || new Date().toISOString();
 
-  // Check if uncommitted changes exist in tools/agy-acp
-  const dirtyCheck = safeGit("git status --porcelain tools/agy-acp", repoRoot);
+  // Check if uncommitted changes exist in repo
+  const dirtyCheck = safeGit("git status --porcelain", repoRoot);
   const isDirty = dirtyCheck.length > 0;
 
   const agyInfo = resolveAgyInfo();
