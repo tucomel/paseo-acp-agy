@@ -109,6 +109,25 @@ describe("Slash Commands Handler", () => {
     expect(formatted).toContain("5 Horas");
   });
 
+  it("should format /usage output from Windows CRLF and fixed-width spaces with 100% and Quota header", () => {
+    const windowsSample =
+      "Quota:\r\n" +
+      "Gemini Models          Weekly Limit Remaining     59%  2026-09-10T19:14:53Z\r\n" +
+      "Gemini Models          Five Hour Limit Remaining  24%  2026-09-05T00:51:04Z\r\n" +
+      "Claude and GPT models  Weekly Limit Remaining    100% 2026-09-09T06:42:10Z\r\n" +
+      "Claude and GPT models  Five Hour Limit Remaining  93%  2026-09-05T02:56:24Z\r\n";
+    const formatted = formatUsageOutput(windowsSample);
+    expect(formatted).toContain("Quotas de Uso");
+    expect(formatted).toContain("Google Gemini");
+    expect(formatted).toContain("Claude & GPT");
+    expect(formatted).toContain("Janela de 5 Horas");
+    expect(formatted).toContain("Cota Semanal");
+    expect(formatted).toContain("100%");
+    expect(formatted).toContain("24%");
+    expect(formatted).toContain("59%");
+    expect(formatted).toContain("93%");
+  });
+
   it("should pass through unknown or model-level slash commands like /plan", async () => {
     const result = await executeSlashCommand("/plan do something", dummySession, "agy");
     expect(result.handled).toBe(false);

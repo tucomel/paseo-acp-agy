@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, ChildProcess, execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
@@ -14,7 +14,7 @@ import {
 } from "./protocol.js";
 import { buildAgyArgs, PermissionSettings, resolvePermissionSettings } from "./permissions.js";
 
-function resolveDefaultAgyBinary(): string {
+export function resolveDefaultAgyBinary(): string {
   if (process.env.AGY_BIN_PATH) return process.env.AGY_BIN_PATH;
   const home = os.homedir();
   if (home) {
@@ -28,6 +28,11 @@ function resolveDefaultAgyBinary(): string {
       for (const cand of candidates) {
         if (fs.existsSync(cand)) return cand;
       }
+      try {
+        const out = execFileSync("where.exe", ["agy"], { encoding: "utf-8", timeout: 1000 }).trim();
+        const first = out.split(/\r?\n/)[0]?.trim();
+        if (first && fs.existsSync(first)) return first;
+      } catch {}
     } else {
       const localPath = path.join(home, ".local", "bin", "agy");
       if (fs.existsSync(localPath)) return localPath;
@@ -181,6 +186,13 @@ export class AntigravityProcess extends EventEmitter {
           error: (err as Error).message,
         });
       }
+    } else if (pid && process.platform === "win32") {
+      try {
+        execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+        return true;
+      } catch {
+        // Fall back to child.kill
+      }
     }
     try {
       return child.kill(signal);
@@ -288,6 +300,7 @@ export class AntigravityProcess extends EventEmitter {
       env: this.env,
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
+      shell: process.platform === "win32",
     });
     this.child = child;
 

@@ -352,35 +352,50 @@ export function parseAgyQuotaOutput(raw: string): QuotaWindow[] {
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.toLowerCase().startsWith("quota:")) continue;
-    const parts = trimmed.split(/\t+|\s{2,}/).map((p) => p.trim());
-    if (parts.length >= 3) {
-      const scope = parts[0];
-      const limitType = parts[1];
-      const remainingMatch = parts[2].match(/(\d+)%/);
-      const resetsAt = parts[3] || null;
-      if (remainingMatch) {
-        const remainingPct = parseInt(remainingMatch[1], 10);
-        const usedPct = Math.max(0, Math.min(100, 100 - remainingPct));
-        const isFiveHour = /five\s*hour/i.test(limitType);
-        const isWeekly = /weekly/i.test(limitType);
-        const isGemini = /gemini/i.test(scope);
 
-        let id = isFiveHour ? "session" : isWeekly ? "weekly" : "quota";
-        let label = isFiveHour ? "Session (5h)" : isWeekly ? "Weekly" : limitType;
-        if (!isGemini) {
-          id = `claude_${id}`;
-          label = `Claude ${label}`;
-        }
+    let scope = "";
+    let limitType = "";
+    let remainingMatch: RegExpMatchArray | null = null;
+    let resetsAt: string | null = null;
 
-        windows.push({
-          id,
-          label,
-          usedPct,
-          remainingPct,
-          resetsAt,
-          tone: deriveUsageTone(usedPct),
-        });
+    const m = trimmed.match(/^(.*?)\s{2,}(.*?Remaining)\s+(\d+%)(?:\s+(.*))?$/i);
+    if (m) {
+      scope = m[1].trim();
+      limitType = m[2].trim();
+      remainingMatch = m[3].match(/(\d+)%/);
+      resetsAt = m[4]?.trim() || null;
+    } else {
+      const parts = trimmed.split(/\t+|\s{2,}/).map((p) => p.trim());
+      if (parts.length >= 3) {
+        scope = parts[0];
+        limitType = parts[1];
+        remainingMatch = parts[2].match(/(\d+)%/);
+        resetsAt = parts[3] || null;
       }
+    }
+
+    if (remainingMatch) {
+      const remainingPct = parseInt(remainingMatch[1], 10);
+      const usedPct = Math.max(0, Math.min(100, 100 - remainingPct));
+      const isFiveHour = /five\s*hour/i.test(limitType);
+      const isWeekly = /weekly/i.test(limitType);
+      const isGemini = /gemini/i.test(scope);
+
+      let id = isFiveHour ? "session" : isWeekly ? "weekly" : "quota";
+      let label = isFiveHour ? "Session (5h)" : isWeekly ? "Weekly" : limitType;
+      if (!isGemini) {
+        id = `claude_${id}`;
+        label = `Claude ${label}`;
+      }
+
+      windows.push({
+        id,
+        label,
+        usedPct,
+        remainingPct,
+        resetsAt,
+        tone: deriveUsageTone(usedPct),
+      });
     }
   }
   return windows;
@@ -454,11 +469,13 @@ export async function fetchAntigravityUsage(
         timeout: 8_000,
         maxBuffer: 1024 * 1024,
         env: process.env,
+        shell: process.platform === "win32",
       }),
       execFileAsync(binaryPath, ["--print", "/credits"], {
         timeout: 8_000,
         maxBuffer: 1024 * 1024,
         env: process.env,
+        shell: process.platform === "win32",
       }),
     ]);
 
@@ -589,6 +606,7 @@ export async function fetchAvailableModels(binaryPath: string = "agy", force = f
       timeout: 5_000,
       env: process.env,
       maxBuffer: 4 * 1024 * 1024,
+      shell: process.platform === "win32",
     });
     const parsed = parseAgyModelsOutput(stdout);
     cachedModels = parsed;

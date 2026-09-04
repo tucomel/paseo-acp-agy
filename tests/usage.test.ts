@@ -396,5 +396,44 @@ Claude and GPT models\tFive Hour Limit Remaining\t20%\t2026-09-03T06:21:47Z
 
       await harness.server.stop();
     });
+
+    it("parses Windows CRLF quota output correctly including 100% limit and reset timestamps", () => {
+      const windowsSample =
+        "Quota:\r\n" +
+        "Gemini Models          Weekly Limit Remaining     59%  2026-09-10T19:14:53Z\r\n" +
+        "Gemini Models          Five Hour Limit Remaining  24%  2026-09-05T00:51:04Z\r\n" +
+        "Claude and GPT models  Weekly Limit Remaining    100% 2026-09-09T06:42:10Z\r\n" +
+        "Claude and GPT models  Five Hour Limit Remaining  93%  2026-09-05T02:56:24Z\r\n";
+      const windows = parseAgyQuotaOutput(windowsSample);
+      expect(windows).toHaveLength(4);
+      expect(windows[0]).toMatchObject({
+        id: "weekly",
+        label: "Weekly",
+        remainingPct: 59,
+        usedPct: 41,
+        resetsAt: "2026-09-10T19:14:53Z",
+      });
+      expect(windows[1]).toMatchObject({
+        id: "session",
+        label: "Session (5h)",
+        remainingPct: 24,
+        usedPct: 76,
+        resetsAt: "2026-09-05T00:51:04Z",
+      });
+      expect(windows[2]).toMatchObject({
+        id: "claude_weekly",
+        label: "Claude Weekly",
+        remainingPct: 100,
+        usedPct: 0,
+        resetsAt: "2026-09-09T06:42:10Z",
+      });
+      expect(windows[3]).toMatchObject({
+        id: "claude_session",
+        label: "Claude Session (5h)",
+        remainingPct: 93,
+        usedPct: 7,
+        resetsAt: "2026-09-05T02:56:24Z",
+      });
+    });
   });
 });

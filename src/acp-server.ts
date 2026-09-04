@@ -22,6 +22,7 @@ import {
 import { SessionManager, Session } from "./session.js";
 import { executeSlashCommand, AVAILABLE_SLASH_COMMANDS } from "./slash-commands.js";
 import { getShortVersion } from "./version.js";
+import { resolveDefaultAgyBinary } from "./antigravity-process.js";
 
 function splitModelAndEffort(modelInput?: string): { model?: string; effort?: string } {
   if (!modelInput) return {};
@@ -50,7 +51,7 @@ export class ACPServer {
   } = {}) {
     this.input = options.input || process.stdin;
     this.output = options.output || process.stdout;
-    this.binaryPath = options.binaryPath || process.env.AGY_BIN_PATH || "agy";
+    this.binaryPath = options.binaryPath || resolveDefaultAgyBinary();
     this.sessionManager =
       options.sessionManager || new SessionManager({ defaultBinaryPath: this.binaryPath });
   }

@@ -57,7 +57,7 @@ function transcriptPath(conversationId: string): string | null {
 
 function summarizeConversation(cid: string, logFile: string, mtime: number): RecentConversation | null {
   try {
-    const lines = fs.readFileSync(logFile, "utf8").split("\n").filter(Boolean);
+    const lines = fs.readFileSync(logFile, "utf8").split(/\r?\n/).filter(Boolean);
     let firstPrompt = "";
     let userTurns = 0;
     for (const line of lines) {
@@ -135,7 +135,7 @@ export function getConversationSteps(cid: string): {
   const logFile = transcriptPath(cid);
   if (!logFile || !fs.existsSync(logFile)) return null;
   try {
-    const lines = fs.readFileSync(logFile, "utf8").split("\n").filter(Boolean);
+    const lines = fs.readFileSync(logFile, "utf8").split(/\r?\n/).filter(Boolean);
     const steps: ConversationStepItem[] = [];
     let userTurns = 0;
     for (let i = 0; i < lines.length; i++) {
@@ -288,10 +288,30 @@ export function formatUsageOutput(rawText: string): string {
       items: Array<{ win: string; isFiveHour: boolean; pct: number; pctStr: string; reset: string }>;
     }
   >();
-  for (const line of rawText.trim().split("\n")) {
-    const parts = line.includes("\t") ? line.split("\t") : line.split(/\s{2,}/);
-    if (parts.length < 3) continue;
-    let fam = parts[0].trim();
+  for (const line of rawText.trim().split(/\r?\n/)) {
+    const trimmedLine = line.trim();
+    if (!trimmedLine || trimmedLine.toLowerCase().startsWith("quota:")) continue;
+
+    let fam = "";
+    let rawWindow = "";
+    let pctStr = "";
+    let reset = "";
+
+    const m = trimmedLine.match(/^(.*?)\s{2,}(.*?Remaining)\s+(\d+%)(?:\s+(.*))?$/i);
+    if (m) {
+      fam = m[1].trim();
+      rawWindow = m[2].trim();
+      pctStr = m[3].trim();
+      reset = m[4]?.trim() || "";
+    } else {
+      const parts = trimmedLine.includes("\t") ? trimmedLine.split("\t") : trimmedLine.split(/\s{2,}/);
+      if (parts.length < 3) continue;
+      fam = parts[0].trim();
+      rawWindow = parts[1].trim();
+      pctStr = parts[2].trim();
+      reset = parts[3]?.trim() || "";
+    }
+
     let icon = "🤖";
     if (fam.toLowerCase().includes("gemini")) {
       fam = "Google Gemini";
@@ -300,7 +320,7 @@ export function formatUsageOutput(rawText: string): string {
       fam = "Claude & GPT";
       icon = "🔶";
     }
-    const rawWindow = parts[1].replace(" Remaining", "").trim();
+    rawWindow = rawWindow.replace(/\s+Remaining$/i, "").trim();
     const lowerWindow = rawWindow.toLowerCase();
     const isFiveHour = lowerWindow.includes("five hour") || /\b5\s*hour/.test(lowerWindow);
     const win = isFiveHour
@@ -308,10 +328,8 @@ export function formatUsageOutput(rawText: string): string {
       : lowerWindow.includes("weekly")
         ? "Cota Semanal"
         : rawWindow;
-    const pctStr = parts[2].trim();
     const parsedPct = Number.parseInt(pctStr.replace("%", ""), 10);
     const pct = Number.isFinite(parsedPct) ? parsedPct : 0;
-    const reset = parts[3]?.trim() || "";
     if (!groups.has(fam)) groups.set(fam, { icon, items: [] });
     groups.get(fam)!.items.push({ win, isFiveHour, pct, pctStr, reset });
   }
@@ -342,6 +360,7 @@ async function runAgySlash(binaryPath: string, cwd: string, slashCommand: string
     env: process.env,
     timeout: AGY_COMMAND_TIMEOUT_MS,
     maxBuffer: AGY_COMMAND_MAX_BUFFER,
+    shell: process.platform === "win32",
   });
   return stdout.trim() || stderr.trim();
 }
