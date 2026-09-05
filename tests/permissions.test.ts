@@ -7,6 +7,7 @@ describe("ACP Permission Settings & CLI Arguments", () => {
   beforeEach(() => {
     delete process.env.AGY_ACP_SANDBOX;
     delete process.env.AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS;
+    delete process.env.AGY_ACP_PRINT_TIMEOUT;
   });
 
   afterEach(() => {
@@ -75,7 +76,7 @@ describe("ACP Permission Settings & CLI Arguments", () => {
   });
 
   describe("buildAgyArgs", () => {
-    it("includes --dangerously-skip-permissions by default", () => {
+    it("includes --dangerously-skip-permissions and default --print-timeout 24h", () => {
       const settings = resolvePermissionSettings();
       const args = buildAgyArgs(settings);
       expect(args).toContain("--dangerously-skip-permissions");
@@ -84,6 +85,16 @@ describe("ACP Permission Settings & CLI Arguments", () => {
       expect(args).toContain("--output-format");
       expect(args).toContain("stream-json");
       expect(args).toContain("--print=");
+      expect(args).toContain("--print-timeout");
+      expect(args[args.indexOf("--print-timeout") + 1]).toBe("24h");
+    });
+
+    it("respects custom printTimeout or AGY_ACP_PRINT_TIMEOUT env", () => {
+      process.env.AGY_ACP_PRINT_TIMEOUT = "12h";
+      const settings = resolvePermissionSettings();
+      expect(settings.printTimeout).toBe("12h");
+      const args = buildAgyArgs(settings);
+      expect(args[args.indexOf("--print-timeout") + 1]).toBe("12h");
     });
 
     it("omits --dangerously-skip-permissions when explicitly disabled", () => {

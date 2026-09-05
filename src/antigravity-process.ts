@@ -291,6 +291,7 @@ export class AntigravityProcess extends EventEmitter {
         dangerouslySkipPermissions: this.permissions.dangerouslySkipPermissions,
         mode: this.mode,
         addDirs,
+        printTimeout: this.permissions.printTimeout,
       },
       extraArgs
     );
