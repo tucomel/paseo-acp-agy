@@ -478,12 +478,14 @@ export async function fetchAntigravityUsage(
         maxBuffer: 1024 * 1024,
         env: process.env,
         shell: process.platform === "win32",
+        windowsHide: true,
       }),
       execFileAsync(cmd, ["--print", "/credits"], {
         timeout: 8_000,
         maxBuffer: 1024 * 1024,
         env: process.env,
         shell: process.platform === "win32",
+        windowsHide: true,
       }),
     ]);
 
@@ -618,6 +620,7 @@ export async function fetchAvailableModels(binaryPath: string = "agy", force = f
         env: process.env,
         maxBuffer: 4 * 1024 * 1024,
         shell: process.platform === "win32",
+        windowsHide: true,
       });
       const parsed = parseAgyModelsOutput(stdout);
       cachedModels = parsed;

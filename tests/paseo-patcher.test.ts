@@ -91,7 +91,7 @@ class ACPAgentSession {
     // Verify acp-agent.js
     const updatedAcp = fs.readFileSync(acpAgentPath, "utf-8");
     expect(updatedAcp).toContain("contextWindowMaxTokens: usage.contextWindowMaxTokens ?? usage.size ?? undefined");
-    expect(updatedAcp).toContain("this.notifySubscribers({");
+    expect(updatedAcp).toContain("deliverTranslatedEvents");
     expect(updatedAcp).toContain('type: "usage_updated"');
   });
 

@@ -363,6 +363,7 @@ async function runAgySlash(binaryPath: string, cwd: string, slashCommand: string
     timeout: AGY_COMMAND_TIMEOUT_MS,
     maxBuffer: AGY_COMMAND_MAX_BUFFER,
     shell: process.platform === "win32",
+    windowsHide: true,
   });
   return stdout.trim() || stderr.trim();
 }

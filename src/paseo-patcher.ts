@@ -44,6 +44,10 @@ export function findPaseoServerInstallations(): string[] {
       path.join(localAppData, "Programs", "Paseo", "resources", "app.asar.unpacked", "node_modules", "@getpaseo", "server"),
       path.join(localAppData, "Programs", "Paseo", "resources", "app", "node_modules", "@getpaseo", "server"),
       path.join(programFiles, "Paseo", "resources", "app.asar.unpacked", "node_modules", "@getpaseo", "server"),
+      path.join(home, "AppData", "Roaming", "npm", "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server"),
+      path.join(home, "AppData", "Roaming", "npm", "node_modules", "@getpaseo", "server"),
+      path.join(home, ".npm-global", "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server"),
+      path.join(home, ".npm-global", "node_modules", "@getpaseo", "server"),
     ];
 
     for (const loc of winLocations) {
@@ -54,7 +58,7 @@ export function findPaseoServerInstallations(): string[] {
     try {
       const npmRoot = execFileSync("cmd.exe", ["/c", "npm.cmd", "root", "-g"], {
         encoding: "utf-8",
-        timeout: 2000,
+        timeout: 8000,
         windowsHide: true,
       }).trim();
       if (npmRoot && fs.existsSync(npmRoot)) {
@@ -65,22 +69,54 @@ export function findPaseoServerInstallations(): string[] {
       }
     } catch {}
 
-    // Check where.exe paseo
+    // Try detecting npm global prefix
     try {
-      const whereOut = execFileSync("where.exe", ["paseo"], {
+      const npmPrefix = execFileSync("cmd.exe", ["/c", "npm.cmd", "config", "get", "prefix"], {
         encoding: "utf-8",
-        timeout: 2000,
+        timeout: 8000,
         windowsHide: true,
       }).trim();
-      const first = whereOut.split(/\r?\n/)[0]?.trim();
-      if (first) {
-        const paseoDir = path.dirname(first);
-        const p1 = path.join(paseoDir, "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server");
-        const p2 = path.join(paseoDir, "node_modules", "@getpaseo", "server");
+      if (npmPrefix && fs.existsSync(npmPrefix)) {
+        const p1 = path.join(npmPrefix, "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server");
+        const p2 = path.join(npmPrefix, "node_modules", "@getpaseo", "server");
         if (fs.existsSync(p1)) candidates.add(path.resolve(p1));
         if (fs.existsSync(p2)) candidates.add(path.resolve(p2));
       }
     } catch {}
+
+    // Check where.exe paseo across all output lines
+    try {
+      const whereOut = execFileSync("where.exe", ["paseo"], {
+        encoding: "utf-8",
+        timeout: 4000,
+        windowsHide: true,
+      }).trim();
+      for (const line of whereOut.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
+        const paseoDir = path.dirname(line);
+        const checks = [
+          path.join(paseoDir, "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server"),
+          path.join(paseoDir, "node_modules", "@getpaseo", "server"),
+          path.join(path.dirname(paseoDir), "node_modules", "@getpaseo", "server"),
+          path.join(paseoDir, "resources", "app.asar.unpacked", "node_modules", "@getpaseo", "server"),
+          path.join(paseoDir, "resources", "app", "node_modules", "@getpaseo", "server"),
+        ];
+        for (const c of checks) {
+          if (fs.existsSync(c)) candidates.add(path.resolve(c));
+        }
+      }
+    } catch {}
+
+    // Search common PATH dirs for npm/node_modules
+    if (process.env.PATH) {
+      for (const p of process.env.PATH.split(";")) {
+        const trimmed = p.trim();
+        if (!trimmed || !fs.existsSync(trimmed)) continue;
+        const p1 = path.join(trimmed, "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server");
+        const p2 = path.join(trimmed, "node_modules", "@getpaseo", "server");
+        if (fs.existsSync(p1)) candidates.add(path.resolve(p1));
+        if (fs.existsSync(p2)) candidates.add(path.resolve(p2));
+      }
+    }
   } else {
     // POSIX locations (Linux / macOS)
     const posixLocations = [
@@ -144,7 +180,7 @@ export function findPaseoServerInstallations(): string[] {
  * injected into Paseo server's quota-fetcher providers.
  */
 export function generateAntigravityQuotaProviderJs(): string {
-  return `import { execFile } from "node:child_process";
+  return `import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
@@ -168,8 +204,7 @@ function resolveAgyBinary() {
                 if (fs.existsSync(cand)) return cand;
             }
             try {
-                const { execFileSync } = require("node:child_process");
-                const out = execFileSync("where.exe", ["agy"], { encoding: "utf-8", timeout: 1000 }).trim();
+                const out = execFileSync("where.exe", ["agy"], { encoding: "utf-8", timeout: 2000, windowsHide: true }).trim();
                 const first = out.split(/\\r?\\n/)[0]?.trim();
                 if (first && fs.existsSync(first)) return first;
             } catch {}
@@ -192,9 +227,13 @@ export class AntigravityQuotaProvider {
     async fetchUsage() {
         try {
             const isWin = process.platform === "win32";
+            let bin = this.binaryPath;
+            if (isWin && bin.includes(" ") && !bin.startsWith('"')) {
+                bin = \`"\${bin}"\`;
+            }
             const [usageRes, creditsRes] = await Promise.allSettled([
-                execFileAsync(this.binaryPath, ["--print", "/usage"], { timeout: 8000, env: process.env, shell: isWin }),
-                execFileAsync(this.binaryPath, ["--print", "/credits"], { timeout: 8000, env: process.env, shell: isWin }),
+                execFileAsync(bin, ["--print", "/usage"], { timeout: 8000, env: process.env, shell: isWin, windowsHide: true }),
+                execFileAsync(bin, ["--print", "/credits"], { timeout: 8000, env: process.env, shell: isWin, windowsHide: true }),
             ]);
 
             const usageOut = usageRes.status === "fulfilled" ? usageRes.value.stdout || usageRes.value.stderr : "";
@@ -416,23 +455,28 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
       }
 
       // Patch handleUsageUpdate
-      if (acpCode.includes("handleUsageUpdate(update) {") && !acpCode.includes("this.notifySubscribers({")) {
-        const oldHandlerRegex = /handleUsageUpdate\s*\(\s*update\s*\)\s*\{[\s\S]*?void\s+update;?[\s\S]*?\}/m;
+      if (acpCode.includes("handleUsageUpdate(update) {") && (!acpCode.includes("this.deliverTranslatedEvents") || acpCode.includes("this.notifySubscribers"))) {
+        const handlerRegex = /handleUsageUpdate\s*\(\s*update\s*\)\s*\{[\s\S]*?(?:void\s+update;|this\.notifySubscribers)[\s\S]*?\n\s*\}/m;
         const newHandler = `handleUsageUpdate(update) {
         if (!update) return;
         const usage = mapACPUsage(update);
         if (usage) {
             this.currentTurnUsage = { ...this.currentTurnUsage, ...usage };
-            this.notifySubscribers({
+            const event = {
                 type: "usage_updated",
                 provider: this.provider,
                 usage: this.currentTurnUsage,
                 ...(this.activeForegroundTurnId ? { turnId: this.activeForegroundTurnId } : {}),
-            });
+            };
+            if (typeof this.deliverTranslatedEvents === "function") {
+                this.deliverTranslatedEvents([event]);
+            } else if (typeof this.pushEvent === "function") {
+                this.pushEvent(event);
+            }
         }
     }`;
-        if (oldHandlerRegex.test(acpCode)) {
-          acpCode = acpCode.replace(oldHandlerRegex, newHandler);
+        if (handlerRegex.test(acpCode)) {
+          acpCode = acpCode.replace(handlerRegex, newHandler);
           acpModified = true;
         }
       }

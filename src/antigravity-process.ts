@@ -29,7 +29,11 @@ export function resolveDefaultAgyBinary(): string {
         if (fs.existsSync(cand)) return cand;
       }
       try {
-        const out = execFileSync("where.exe", ["agy"], { encoding: "utf-8", timeout: 1000 }).trim();
+        const out = execFileSync("where.exe", ["agy"], {
+          encoding: "utf-8",
+          timeout: 2000,
+          windowsHide: true,
+        }).trim();
         const first = out.split(/\r?\n/)[0]?.trim();
         if (first && fs.existsSync(first)) return first;
       } catch {}
@@ -188,7 +192,10 @@ export class AntigravityProcess extends EventEmitter {
       }
     } else if (pid && process.platform === "win32") {
       try {
-        execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+        execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
         return true;
       } catch {
         // Fall back to child.kill
@@ -295,12 +302,14 @@ export class AntigravityProcess extends EventEmitter {
       effectiveEffort,
     });
 
+    const isWin = process.platform === "win32";
     const child = spawn(this.binaryPath, args, {
       cwd: this.cwd,
       env: this.env,
       stdio: ["pipe", "pipe", "pipe"],
-      detached: process.platform !== "win32",
-      shell: process.platform === "win32",
+      detached: !isWin,
+      shell: isWin,
+      windowsHide: true,
     });
     this.child = child;
 
