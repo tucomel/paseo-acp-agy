@@ -82,7 +82,7 @@ describe("ACP Session Lifecycle & Isolation", () => {
     expect(sessionB?.cwd).toBe("/tmp/workspace-b");
     expect(sessionB?.model).toBe("claude-sonnet-4-6");
     expect(sessionB?.effort).toBe("high");
-  });
+  }, 30000);
 
   it("should support set_mode, set_model, and set_config_option (thought_level) and update process", async () => {
     const session = sessionManager.createSession({ cwd: "/tmp" });

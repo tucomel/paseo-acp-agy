@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { logger } from "./logger.js";
 import { Session } from "./session.js";
 import { sessionStore } from "./session-store.js";
+import { formatExecBinaryPath } from "./protocol.js";
 
 const execFileAsync = promisify(execFile);
 const AGY_COMMAND_TIMEOUT_MS = 30_000;
@@ -355,7 +356,8 @@ export function formatUsageOutput(rawText: string): string {
 }
 
 async function runAgySlash(binaryPath: string, cwd: string, slashCommand: string): Promise<string> {
-  const { stdout, stderr } = await execFileAsync(binaryPath, ["--print", slashCommand], {
+  const cmd = formatExecBinaryPath(binaryPath);
+  const { stdout, stderr } = await execFileAsync(cmd, ["--print", slashCommand], {
     cwd,
     env: process.env,
     timeout: AGY_COMMAND_TIMEOUT_MS,

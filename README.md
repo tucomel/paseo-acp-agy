@@ -90,6 +90,28 @@ To include `paseo-acp-agy` in Paseo's built-in provider store (`ACP_PROVIDER_CAT
 
 ---
 
+## Plan Usage & Context Window Meter Setup
+
+To display the **Google Antigravity** quota breakdown in Paseo's `Settings -> Usage` (Plan usage) and activate the real-time context-window meter ("bolinha") in the chat composer:
+
+```bash
+npx -y paseo-acp-agy setup
+```
+
+Or if installed globally:
+```bash
+paseo-acp-agy setup
+```
+
+Then restart your Paseo app or daemon:
+```bash
+paseo daemon restart
+```
+
+> **Note**: `paseo-acp-agy` also checks and auto-configures your local Paseo server automatically whenever it launches via `--acp`. Running `setup` manually ensures your existing daemon instance picks up the telemetry hooks immediately upon restart.
+
+---
+
 ## Requirements
 
 - **Node.js**: >= 20.0.0 (Node.js 22 recommended)

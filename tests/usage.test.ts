@@ -435,5 +435,83 @@ Claude and GPT models\tFive Hour Limit Remaining\t20%\t2026-09-03T06:21:47Z
         resetsAt: "2026-09-05T02:56:24Z",
       });
     });
+
+    it("emits an initial usage_update notification when session/new is initialized", async () => {
+      const store = new SessionStore(path.join(tempDir, "initial-usage-sessions"));
+      const manager = new SessionManager({ store });
+      const harness = makeRpcHarness(manager);
+
+      harness.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: { cwd: tempDir, model: "gemini-3.7-flash" },
+      });
+
+      const response = await harness.waitForResponse(1, 10_000);
+      expect(response.result.sessionId).toBeDefined();
+
+      const initialUsage = harness.messages.find(
+        (msg) => msg.params?.update?.sessionUpdate === "usage_update"
+      );
+      expect(initialUsage).toBeDefined();
+      expect(initialUsage.params.update.size).toBe(1_048_576);
+      expect(initialUsage.params.update.used).toBe(0);
+      expect(initialUsage.params.update.contextWindowMaxTokens).toBe(1_048_576);
+      expect(initialUsage.params.update.contextWindowUsedTokens).toBe(0);
+
+      await harness.server.stop();
+    });
+
+    it("emits usage_update on prompt turn completion even when steps have no intermediate usage (Windows behavior)", async () => {
+      const store = new SessionStore(path.join(tempDir, "turn-completion-usage"));
+      const manager = new SessionManager({ store });
+      const session = manager.createSession({ cwd: tempDir, model: "gemini-3.7-flash" });
+
+      // Simulate Windows where streaming steps omit usage and only result has final usage
+      vi.spyOn(session.process, "sendPrompt").mockImplementation(async (_text, onStepUpdate) => {
+        onStepUpdate?.({
+          event: "step_update",
+          step_update: {
+            conversation_id: session.id,
+            step_index: 1,
+            state: "ACTIVE",
+            step_type: "agent_response",
+            // Notice: no usage reported in step_update!
+          },
+        });
+        return {
+          event: "result",
+          result: {
+            conversation_id: session.id,
+            status: "SUCCESS",
+            response: "done",
+            usage: { input_tokens: 341_000, output_tokens: 1_200 },
+          },
+        };
+      });
+
+      const harness = makeRpcHarness(manager);
+      harness.send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: { sessionId: session.id, prompt: "test prompt" },
+      });
+
+      await harness.waitForResponse(2);
+
+      const usageNotifications = harness.messages.filter(
+        (msg) => msg.params?.update?.sessionUpdate === "usage_update"
+      );
+      expect(usageNotifications.length).toBeGreaterThan(0);
+      const lastUsage = usageNotifications[usageNotifications.length - 1];
+      expect(lastUsage.params.update.size).toBe(1_048_576);
+      expect(lastUsage.params.update.used).toBe(342_200);
+      expect(lastUsage.params.update.contextWindowMaxTokens).toBe(1_048_576);
+      expect(lastUsage.params.update.contextWindowUsedTokens).toBe(342_200);
+
+      await harness.server.stop();
+    });
   });
 });

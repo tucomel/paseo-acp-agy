@@ -111,6 +111,27 @@ export class ACPServer {
     });
   }
 
+  private publishUsageUpdate(session: Session) {
+    const costUsd = roundUsageCostUsd(session.usage.totalCostUsd);
+    this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+      sessionId: session.id,
+      update: {
+        sessionUpdate: "usage_update",
+        size: session.usage.contextWindowMaxTokens,
+        used: session.usage.contextWindowUsedTokens,
+        cost: { amount: costUsd, currency: "USD" },
+        inputTokens: session.usage.inputTokens,
+        outputTokens: session.usage.outputTokens,
+        cachedReadTokens: session.usage.cachedInputTokens,
+        cachedInputTokens: session.usage.cachedInputTokens,
+        totalTokens: session.usage.totalTokens,
+        totalCostUsd: costUsd,
+        contextWindowMaxTokens: session.usage.contextWindowMaxTokens,
+        contextWindowUsedTokens: session.usage.contextWindowUsedTokens,
+      },
+    });
+  }
+
   private async sessionState(session: Session, forceModels = false) {
     const availableModels = await fetchAvailableModels(this.binaryPath, forceModels);
     return {
@@ -234,6 +255,7 @@ export class ACPServer {
           if (!isNotification) {
             this.sendSuccess(id, await this.sessionState(session, true));
             this.publishCommands(session.id);
+            this.publishUsageUpdate(session);
           }
           break;
         }
@@ -275,6 +297,7 @@ export class ACPServer {
             if (!isNotification) {
               this.sendSuccess(id, await this.sessionState(session));
               this.publishCommands(session.id);
+              this.publishUsageUpdate(session);
             }
           } catch (err) {
             if (created || session) {
@@ -448,6 +471,7 @@ export class ACPServer {
               // after model/tool work. Record it before branching on status.
               session.recordTurnUsage(turnUsage, executingModel);
               const usagePayload = this.turnUsagePayload(session, turnUsage, executingModel);
+              this.publishUsageUpdate(session);
 
               if (session.isCancelled) {
                 if (!isNotification) {

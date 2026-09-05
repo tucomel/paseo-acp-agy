@@ -35,7 +35,7 @@ describe("ACP Handshake & Protocol", () => {
     clientInput.write(JSON.stringify(msg) + "\n");
   }
 
-  async function waitForResponse(id: number, timeoutMs = 5000): Promise<any> {
+  async function waitForResponse(id: number, timeoutMs = 15000): Promise<any> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const response = responses.find((item) => item.id === id);

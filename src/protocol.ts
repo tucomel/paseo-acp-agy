@@ -449,6 +449,13 @@ function cacheProviderUsage(binaryPath: string, result: ProviderUsage, now: numb
   return result;
 }
 
+export function formatExecBinaryPath(binaryPath: string): string {
+  if (process.platform === "win32" && binaryPath.includes(" ") && !binaryPath.startsWith('"')) {
+    return `"${binaryPath}"`;
+  }
+  return binaryPath;
+}
+
 export async function fetchAntigravityUsage(
   binaryPath: string = "agy",
   force: boolean = false
@@ -463,15 +470,16 @@ export async function fetchAntigravityUsage(
     return cachedProviderUsage;
   }
 
+  const cmd = formatExecBinaryPath(binaryPath);
   try {
     const [usageResult, creditsResult] = await Promise.allSettled([
-      execFileAsync(binaryPath, ["--print", "/usage"], {
+      execFileAsync(cmd, ["--print", "/usage"], {
         timeout: 8_000,
         maxBuffer: 1024 * 1024,
         env: process.env,
         shell: process.platform === "win32",
       }),
-      execFileAsync(binaryPath, ["--print", "/credits"], {
+      execFileAsync(cmd, ["--print", "/credits"], {
         timeout: 8_000,
         maxBuffer: 1024 * 1024,
         env: process.env,
@@ -553,6 +561,7 @@ export const FALLBACK_MODELS: ModelDefinition[] = [
 let cachedModels: ModelDefinition[] | null = null;
 let cachedModelsBinaryPath: string | null = null;
 let lastModelFetch = 0;
+let inFlightModelFetch: Promise<ModelDefinition[]> | null = null;
 const MODEL_CACHE_TTL_MS = 60_000;
 
 export function parseAgyModelsOutput(rawOutput: string): ModelDefinition[] {
@@ -565,24 +574,21 @@ export function parseAgyModelsOutput(rawOutput: string): ModelDefinition[] {
     const modelId = parts[0];
     const label = parts[1];
     const effortMatch = modelId.match(/-(high|medium|low)$/);
-    let baseId = modelId;
-    let baseLabel = label;
-    let effort: string | null = null;
-    if (effortMatch) {
-      effort = effortMatch[1];
-      baseId = modelId.slice(0, -(effort.length + 1));
-      baseLabel = label.replace(/\s*\((High|Medium|Low)\)$/, "");
-    }
+    const baseId = effortMatch ? modelId.replace(/-(high|medium|low)$/, "") : modelId;
+    const effort = effortMatch ? effortMatch[1] : undefined;
+    const cleanLabel = effortMatch
+      ? label.replace(/\s*\((High|Medium|Low)\)$/i, "").trim()
+      : label;
+
     if (!modelsMap.has(baseId)) {
       modelsMap.set(baseId, {
         modelId: baseId,
-        name: baseLabel,
+        name: cleanLabel,
         description: label,
-        supportedEfforts: [],
+        supportedEfforts: effort ? [effort] : [],
         contextWindowMaxTokens: getModelContextWindow(baseId),
       });
-    }
-    if (effort) {
+    } else if (effort) {
       const entry = modelsMap.get(baseId)!;
       if (!entry.supportedEfforts.includes(effort)) entry.supportedEfforts.push(effort);
     }
@@ -601,27 +607,36 @@ export async function fetchAvailableModels(binaryPath: string = "agy", force = f
   ) {
     return cachedModels;
   }
-  try {
-    const { stdout } = await execFileAsync(binaryPath, ["models"], {
-      timeout: 5_000,
-      env: process.env,
-      maxBuffer: 4 * 1024 * 1024,
-      shell: process.platform === "win32",
-    });
-    const parsed = parseAgyModelsOutput(stdout);
-    cachedModels = parsed;
-    cachedModelsBinaryPath = binaryPath;
-    lastModelFetch = now;
-    return parsed;
-  } catch (err) {
-    logger.warn("Failed to fetch models from agy CLI, using fallback models", {
-      error: (err as Error).message,
-    });
-    cachedModels = FALLBACK_MODELS;
-    cachedModelsBinaryPath = binaryPath;
-    lastModelFetch = now;
-    return FALLBACK_MODELS;
+  if (inFlightModelFetch) {
+    return inFlightModelFetch;
   }
+  inFlightModelFetch = (async () => {
+    const cmd = formatExecBinaryPath(binaryPath);
+    try {
+      const { stdout } = await execFileAsync(cmd, ["models"], {
+        timeout: 10_000,
+        env: process.env,
+        maxBuffer: 4 * 1024 * 1024,
+        shell: process.platform === "win32",
+      });
+      const parsed = parseAgyModelsOutput(stdout);
+      cachedModels = parsed;
+      cachedModelsBinaryPath = binaryPath;
+      lastModelFetch = Date.now();
+      return parsed;
+    } catch (err) {
+      logger.warn("Failed to fetch models from agy CLI, using fallback models", {
+        error: (err as Error).message,
+      });
+      cachedModels = FALLBACK_MODELS;
+      cachedModelsBinaryPath = binaryPath;
+      lastModelFetch = Date.now();
+      return FALLBACK_MODELS;
+    } finally {
+      inFlightModelFetch = null;
+    }
+  })();
+  return inFlightModelFetch;
 }
 
 export function getEffectiveEffortForModel(
