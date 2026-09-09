@@ -472,8 +472,18 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
 
       // Patch handleUsageUpdate
       if (acpCode.includes("handleUsageUpdate(update) {") && (!acpCode.includes("this.deliverTranslatedEvents") || acpCode.includes("this.notifySubscribers"))) {
-        const handlerRegex = /handleUsageUpdate\s*\(\s*update\s*\)\s*\{[\s\S]*?(?:void\s+update;|this\.notifySubscribers)[\s\S]*?\n\s*\}/m;
-        const newHandler = `handleUsageUpdate(update) {
+        const startIdx = acpCode.indexOf("handleUsageUpdate");
+        const openBrace = acpCode.indexOf("{", startIdx);
+        if (startIdx !== -1 && openBrace !== -1) {
+          let depth = 1;
+          let i = openBrace + 1;
+          while (i < acpCode.length && depth > 0) {
+            if (acpCode[i] === "{") depth++;
+            else if (acpCode[i] === "}") depth--;
+            i++;
+          }
+          if (depth === 0) {
+            const newHandler = `handleUsageUpdate(update) {
         if (!update) return;
         const usage = mapACPUsage(update);
         if (usage) {
@@ -491,9 +501,9 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
             }
         }
     }`;
-        if (handlerRegex.test(acpCode)) {
-          acpCode = acpCode.replace(handlerRegex, newHandler);
-          acpModified = true;
+            acpCode = acpCode.slice(0, startIdx) + newHandler + acpCode.slice(i);
+            acpModified = true;
+          }
         }
       }
 
