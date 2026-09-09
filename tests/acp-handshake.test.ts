@@ -88,16 +88,27 @@ describe("ACP Handshake & Protocol", () => {
     expect(commands).toBeDefined();
   });
 
-  it("rejects session/load until history replay is implemented", async () => {
+  it("loads and resumes existing or requested session via session/load", async () => {
     sendRpc({
       jsonrpc: "2.0",
-      id: 3,
-      method: "session/load",
-      params: { sessionId: "anything", cwd: "/tmp", mcpServers: [] },
+      id: 20,
+      method: "session/new",
+      params: { cwd: "/tmp", model: "gemini-3.7-flash-high" },
     });
-    const response = await waitForResponse(3);
-    expect(response.error.code).toBe(-32601);
-    expect(response.error.message).toContain("session/load");
+    const newSessionResponse = await waitForResponse(20);
+    const existingId = newSessionResponse.result.sessionId;
+
+    sendRpc({
+      jsonrpc: "2.0",
+      id: 21,
+      method: "session/load",
+      params: { sessionId: existingId, cwd: "/tmp", mcpServers: [] },
+    });
+    const response = await waitForResponse(21);
+    expect(response.result).toBeDefined();
+    expect(response.result.sessionId).toBe(existingId);
+    expect(response.result.modes.availableModes.length).toBeGreaterThan(0);
+    expect(response.result.models.availableModels.length).toBeGreaterThan(0);
   });
 
   it("returns method not found for unknown methods", async () => {

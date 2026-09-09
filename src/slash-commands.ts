@@ -357,14 +357,18 @@ export function formatUsageOutput(rawText: string): string {
 
 async function runAgySlash(binaryPath: string, cwd: string, slashCommand: string): Promise<string> {
   const cmd = formatExecBinaryPath(binaryPath);
-  const { stdout, stderr } = await execFileAsync(cmd, ["--print", slashCommand], {
-    cwd,
-    env: process.env,
-    timeout: AGY_COMMAND_TIMEOUT_MS,
-    maxBuffer: AGY_COMMAND_MAX_BUFFER,
-    shell: process.platform === "win32",
-    windowsHide: true,
-  });
+  const { stdout, stderr } = await execFileAsync(
+    cmd,
+    ["--print-timeout", "24h", "--print", slashCommand],
+    {
+      cwd,
+      env: process.env,
+      timeout: AGY_COMMAND_TIMEOUT_MS,
+      maxBuffer: AGY_COMMAND_MAX_BUFFER,
+      shell: process.platform === "win32",
+      windowsHide: true,
+    }
+  );
   return stdout.trim() || stderr.trim();
 }
 

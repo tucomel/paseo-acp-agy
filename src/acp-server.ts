@@ -262,12 +262,41 @@ export class ACPServer {
 
         case ACP_METHODS.SESSION_LOAD:
         case ACP_METHODS.SESSION_LOAD_ALIAS: {
-          if (!isNotification) {
-            this.sendError(
-              id,
-              -32601,
-              "session/load is not supported because agy-acp does not replay prior history; use session/resume"
-            );
+          const sessionId = String(params.sessionId || "");
+          const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
+          if (!sessionId) {
+            if (!isNotification) this.sendError(id, -32602, "sessionId is required");
+            break;
+          }
+
+          let session = this.sessionManager.getSession(sessionId);
+          let created = false;
+          try {
+            if (!session) {
+              session = this.sessionManager.createSession({
+                id: sessionId,
+                cwd,
+                binaryPath: this.binaryPath,
+              });
+              created = true;
+            }
+            if (!created && session.process.currentConversationId) {
+              await session.ensureReadyForResume();
+            }
+
+            if (!isNotification) {
+              this.sendSuccess(id, await this.sessionState(session));
+              this.publishCommands(session.id);
+              this.publishUsageUpdate(session);
+            }
+          } catch (err) {
+            if (!isNotification) {
+              this.sendError(
+                id,
+                -32603,
+                `Failed to load session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`
+              );
+            }
           }
           break;
         }

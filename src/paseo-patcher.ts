@@ -8,6 +8,8 @@ export interface PatchResult {
   found: boolean;
   serverPaths: string[];
   patchedPaths: string[];
+  asarPaths?: string[];
+  patchedAsarPaths?: string[];
   errors: string[];
 }
 
@@ -194,11 +196,25 @@ function resolveAgyBinary() {
     const home = os.homedir();
     if (home) {
         if (process.platform === "win32") {
+            const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
+            const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
+            const programFiles = process.env.ProgramFiles || "C:\\\\Program Files";
+            const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\\\Program Files (x86)";
+
             const candidates = [
                 path.join(home, ".local", "bin", "agy.exe"),
-                path.join(home, "AppData", "Local", "Programs", "antigravity", "agy.exe"),
                 path.join(home, ".local", "bin", "agy.cmd"),
                 path.join(home, ".local", "bin", "agy.bat"),
+                path.join(appData, "npm", "agy.cmd"),
+                path.join(appData, "npm", "agy.exe"),
+                path.join(appData, "npm", "agy.bat"),
+                path.join(localAppData, "npm", "agy.cmd"),
+                path.join(localAppData, "npm", "agy.exe"),
+                path.join(localAppData, "Programs", "antigravity", "agy.exe"),
+                path.join(localAppData, "Programs", "Antigravity", "bin", "agy.exe"),
+                path.join(localAppData, "Microsoft", "WindowsApps", "agy.exe"),
+                path.join(programFiles, "Antigravity", "bin", "agy.exe"),
+                path.join(programFilesX86, "Antigravity", "bin", "agy.exe"),
             ];
             for (const cand of candidates) {
                 if (fs.existsSync(cand)) return cand;
@@ -232,8 +248,8 @@ export class AntigravityQuotaProvider {
                 bin = \`"\${bin}"\`;
             }
             const [usageRes, creditsRes] = await Promise.allSettled([
-                execFileAsync(bin, ["--print", "/usage"], { timeout: 8000, env: process.env, shell: isWin, windowsHide: true }),
-                execFileAsync(bin, ["--print", "/credits"], { timeout: 8000, env: process.env, shell: isWin, windowsHide: true }),
+                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/usage"], { timeout: 15000, env: process.env, shell: isWin, windowsHide: true }),
+                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/credits"], { timeout: 15000, env: process.env, shell: isWin, windowsHide: true }),
             ]);
 
             const usageOut = usageRes.status === "fulfilled" ? usageRes.value.stdout || usageRes.value.stderr : "";
@@ -496,11 +512,181 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
 }
 
 /**
- * Discovers and patches all accessible Paseo installations.
+ * Searches the host machine for Paseo Desktop app.asar archives across
+ * Windows, macOS, and Linux.
  */
-export function ensurePaseoIntegration(options?: { verbose?: boolean; targetPaths?: string[] }): PatchResult {
+export function findPaseoAsarPaths(): string[] {
+  const candidates = new Set<string>();
+  const home = os.homedir();
+
+  if (process.env.PASEO_ASAR_PATH && fs.existsSync(process.env.PASEO_ASAR_PATH)) {
+    candidates.add(path.resolve(process.env.PASEO_ASAR_PATH));
+  }
+
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || (home ? path.join(home, "AppData", "Local") : "");
+    const appData = process.env.APPDATA || (home ? path.join(home, "AppData", "Roaming") : "");
+    const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+    const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+
+    const winAsarLocations = [
+      path.join(localAppData, "Programs", "Paseo", "resources", "app.asar"),
+      path.join(localAppData, "Paseo", "resources", "app.asar"),
+      path.join(programFiles, "Paseo", "resources", "app.asar"),
+      path.join(programFilesX86, "Paseo", "resources", "app.asar"),
+      path.join(appData, "Paseo", "resources", "app.asar"),
+    ];
+
+    for (const loc of winAsarLocations) {
+      if (loc && fs.existsSync(loc)) candidates.add(path.resolve(loc));
+    }
+
+    try {
+      const whereOut = execFileSync("where.exe", ["paseo"], {
+        encoding: "utf-8",
+        timeout: 2000,
+        windowsHide: true,
+      }).trim();
+      for (const line of whereOut.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
+        const asarCandidate = path.join(path.dirname(line), "resources", "app.asar");
+        if (fs.existsSync(asarCandidate)) candidates.add(path.resolve(asarCandidate));
+      }
+    } catch {}
+  } else if (process.platform === "darwin") {
+    const macLocations = [
+      "/Applications/Paseo.app/Contents/Resources/app.asar",
+      path.join(home, "Applications", "Paseo.app", "Contents", "Resources", "app.asar"),
+    ];
+    for (const loc of macLocations) {
+      if (fs.existsSync(loc)) candidates.add(path.resolve(loc));
+    }
+  } else {
+    const linuxLocations = [
+      "/opt/Paseo/resources/app.asar",
+      "/usr/lib/paseo/resources/app.asar",
+      path.join(home, ".local", "share", "paseo", "resources", "app.asar"),
+    ];
+    for (const loc of linuxLocations) {
+      if (fs.existsSync(loc)) candidates.add(path.resolve(loc));
+    }
+  }
+
+  return Array.from(candidates);
+}
+
+/**
+ * Extracts, patches, and repacks a Paseo app.asar archive to integrate Antigravity
+ * quota fetchers and token telemetry.
+ */
+export async function patchPaseoAsar(
+  asarPath: string
+): Promise<{ success: boolean; changes: string[]; error?: string }> {
+  const changes: string[] = [];
+  let tempDir: string | null = null;
+  let tempAsar: string | null = null;
+
+  try {
+    if (!fs.existsSync(asarPath)) {
+      return { success: false, changes: [], error: `Asar archive not found: ${asarPath}` };
+    }
+
+    // Dynamic import of @electron/asar
+    const asarModule = await import("@electron/asar");
+    const asar = (asarModule as any).default || asarModule;
+
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paseo-asar-extract-"));
+    asar.extractAll(asarPath, tempDir);
+
+    // Look for server directory in extracted files
+    const serverCandidates = [
+      path.join(tempDir, "node_modules", "@getpaseo", "server"),
+      path.join(tempDir, "dist", "node_modules", "@getpaseo", "server"),
+    ];
+    let serverDir = serverCandidates.find((c) => fs.existsSync(c));
+
+    if (!serverDir) {
+      // Search recursively within 3 levels
+      const searchDirs = [tempDir];
+      while (searchDirs.length > 0 && !serverDir) {
+        const current = searchDirs.shift()!;
+        try {
+          const entries = fs.readdirSync(current, { withFileTypes: true });
+          for (const ent of entries) {
+            if (ent.isDirectory()) {
+              const full = path.join(current, ent.name);
+              if (ent.name === "server" && full.includes(path.join("@getpaseo", "server"))) {
+                serverDir = full;
+                break;
+              }
+              if (full.split(path.sep).length - tempDir.split(path.sep).length < 4) {
+                searchDirs.push(full);
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+
+    if (!serverDir) {
+      return { success: false, changes: [], error: `Could not locate @getpaseo/server inside ${asarPath}` };
+    }
+
+    const patchResult = patchPaseoServer(serverDir);
+    if (!patchResult.success) {
+      return { success: false, changes: [], error: patchResult.error };
+    }
+
+    if (patchResult.changes.length === 0) {
+      // Already patched!
+      return { success: true, changes: [] };
+    }
+
+    changes.push(...patchResult.changes);
+
+    // Create backup if not already present
+    const backupPath = `${asarPath}.bak`;
+    if (!fs.existsSync(backupPath)) {
+      fs.copyFileSync(asarPath, backupPath);
+      changes.push(`Backed up original asar to ${backupPath}`);
+    }
+
+    tempAsar = path.join(os.tmpdir(), `app-${Date.now()}.asar`);
+    await asar.createPackage(tempDir, tempAsar);
+
+    // Replace original archive
+    fs.copyFileSync(tempAsar, asarPath);
+    changes.push(`Repacked updated asar archive at ${asarPath}`);
+
+    return { success: true, changes };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, changes, error: msg };
+  } finally {
+    if (tempDir) {
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {}
+    }
+    if (tempAsar) {
+      try {
+        fs.unlinkSync(tempAsar);
+      } catch {}
+    }
+  }
+}
+
+/**
+ * Discovers and patches all accessible Paseo installations (both directory and app.asar).
+ */
+export async function ensurePaseoIntegration(options?: {
+  verbose?: boolean;
+  targetPaths?: string[];
+  targetAsarPaths?: string[];
+}): Promise<PatchResult> {
   const serverPaths = options?.targetPaths || findPaseoServerInstallations();
+  const asarPaths = options?.targetAsarPaths || findPaseoAsarPaths();
   const patchedPaths: string[] = [];
+  const patchedAsarPaths: string[] = [];
   const errors: string[] = [];
 
   for (const sPath of serverPaths) {
@@ -517,10 +703,26 @@ export function ensurePaseoIntegration(options?: { verbose?: boolean; targetPath
     }
   }
 
+  for (const aPath of asarPaths) {
+    const res = await patchPaseoAsar(aPath);
+    if (res.success) {
+      if (res.changes.length > 0) {
+        patchedAsarPaths.push(aPath);
+        if (options?.verbose) {
+          logger.info(`Integrated with Paseo desktop asar at ${aPath}`, { changes: res.changes });
+        }
+      }
+    } else if (res.error) {
+      errors.push(`${aPath}: ${res.error}`);
+    }
+  }
+
   return {
-    found: serverPaths.length > 0,
+    found: serverPaths.length > 0 || asarPaths.length > 0,
     serverPaths,
     patchedPaths,
+    asarPaths,
+    patchedAsarPaths,
     errors,
   };
 }

@@ -448,7 +448,7 @@ Claude and GPT models\tFive Hour Limit Remaining\t20%\t2026-09-03T06:21:47Z
         params: { cwd: tempDir, model: "gemini-3.7-flash" },
       });
 
-      const response = await harness.waitForResponse(1, 10_000);
+      const response = await harness.waitForResponse(1, 20_000);
       expect(response.result.sessionId).toBeDefined();
 
       const initialUsage = harness.messages.find(

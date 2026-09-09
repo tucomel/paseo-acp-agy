@@ -19,11 +19,25 @@ export function resolveDefaultAgyBinary(): string {
   const home = os.homedir();
   if (home) {
     if (process.platform === "win32") {
+      const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
+      const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
+      const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+      const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+
       const candidates = [
         path.join(home, ".local", "bin", "agy.exe"),
-        path.join(home, "AppData", "Local", "Programs", "antigravity", "agy.exe"),
         path.join(home, ".local", "bin", "agy.cmd"),
         path.join(home, ".local", "bin", "agy.bat"),
+        path.join(appData, "npm", "agy.cmd"),
+        path.join(appData, "npm", "agy.exe"),
+        path.join(appData, "npm", "agy.bat"),
+        path.join(localAppData, "npm", "agy.cmd"),
+        path.join(localAppData, "npm", "agy.exe"),
+        path.join(localAppData, "Programs", "antigravity", "agy.exe"),
+        path.join(localAppData, "Programs", "Antigravity", "bin", "agy.exe"),
+        path.join(localAppData, "Microsoft", "WindowsApps", "agy.exe"),
+        path.join(programFiles, "Antigravity", "bin", "agy.exe"),
+        path.join(programFilesX86, "Antigravity", "bin", "agy.exe"),
       ];
       for (const cand of candidates) {
         if (fs.existsSync(cand)) return cand;

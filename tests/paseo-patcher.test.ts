@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   findPaseoServerInstallations,
   patchPaseoServer,
+  patchPaseoAsar,
   ensurePaseoIntegration,
   generateAntigravityQuotaProviderJs,
 } from "../src/paseo-patcher.js";
@@ -135,9 +136,47 @@ export const PROVIDER_USAGE_FETCHERS = [
     delete process.env.PASEO_SERVER_PATH;
   });
 
-  it("should gracefully succeed with ensurePaseoIntegration", () => {
-    const result = ensurePaseoIntegration({ targetPaths: [tempDir] });
+  it("should gracefully succeed with ensurePaseoIntegration", async () => {
+    const result = await ensurePaseoIntegration({ targetPaths: [tempDir], targetAsarPaths: [] });
     expect(result.found).toBe(true);
     expect(result.errors).toHaveLength(0);
+  });
+
+  it("should extract, patch, and repack a Paseo app.asar package", async () => {
+    const asarModule = await import("@electron/asar");
+    const asar = asarModule.default || asarModule;
+
+    // Create a mock asar source directory
+    const asarSrcDir = path.join(tempDir, "mock-app");
+    const quotaDir = path.join(asarSrcDir, "node_modules", "@getpaseo", "server", "dist", "server", "services", "quota-fetcher");
+    fs.mkdirSync(quotaDir, { recursive: true });
+    const manifestPath = path.join(quotaDir, "manifest.js");
+    fs.writeFileSync(
+      manifestPath,
+      `import { ClaudeQuotaProvider } from "./providers/claude.js";
+export const PROVIDER_USAGE_FETCHERS = [
+    {
+        providerId: "claude",
+        create: (options) => new ClaudeQuotaProvider(options),
+    },
+];
+`,
+      "utf-8"
+    );
+
+    const asarPath = path.join(tempDir, "app.asar");
+    await asar.createPackage(asarSrcDir, asarPath);
+
+    const patchRes = await patchPaseoAsar(asarPath);
+    expect(patchRes.success).toBe(true);
+    expect(patchRes.changes.length).toBeGreaterThan(0);
+
+    // Verify backup created
+    expect(fs.existsSync(`${asarPath}.bak`)).toBe(true);
+
+    // Verify asar package now contains the antigravity provider
+    try { asar.uncache(asarPath); } catch {}
+    const files = asar.listPackage(asarPath);
+    expect(files.some((f: string) => f.includes("antigravity.js"))).toBe(true);
   });
 });

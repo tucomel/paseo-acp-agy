@@ -54,24 +54,29 @@ if (
 ) {
   process.stdout.write("Checking Paseo installation and configuring Antigravity telemetry...\n");
   try {
-    const res = ensurePaseoIntegration({ verbose: true });
+    const res = await ensurePaseoIntegration({ verbose: true });
     if (!res.found) {
       process.stdout.write(
-        "Notice: No active @getpaseo/server installation found in standard paths.\n" +
-        "If Paseo is installed in a custom directory, set PASEO_SERVER_PATH and run setup again.\n"
+        "Notice: No active @getpaseo/server installation or app.asar found in standard paths.\n" +
+        "If Paseo is installed in a custom directory, set PASEO_SERVER_PATH or PASEO_ASAR_PATH and run setup again.\n"
       );
     } else {
+      const totalFound = res.serverPaths.length + (res.asarPaths?.length || 0);
       process.stdout.write(
-        `Found ${res.serverPaths.length} Paseo server installation(s).\n`
+        `Found ${totalFound} Paseo installation target(s) (${res.serverPaths.length} server dir(s), ${res.asarPaths?.length || 0} asar package(s)).\n`
       );
-      if (res.patchedPaths.length > 0) {
+      const allPatched = [...res.patchedPaths, ...(res.patchedAsarPaths || [])];
+      if (allPatched.length > 0) {
         process.stdout.write(
-          `Successfully integrated with: \n${res.patchedPaths.map((p) => `  - ${p}`).join("\n")}\n\n` +
+          `Successfully integrated with: \n${allPatched.map((p) => `  - ${p}`).join("\n")}\n\n` +
           `Antigravity quota provider and context-window telemetry are now enabled!\n` +
           `Please restart Paseo (or run 'paseo daemon restart') to apply changes.\n`
         );
       } else {
         process.stdout.write("Paseo is already up-to-date and configured for Antigravity telemetry.\n");
+      }
+      if (res.errors.length > 0) {
+        process.stderr.write(`Notice: Some paths could not be modified (may require admin/close Paseo):\n${res.errors.map(e => `  - ${e}`).join("\n")}\n`);
       }
     }
   } catch (err) {
@@ -81,9 +86,7 @@ if (
 }
 
 // Auto-run integration in background when starting ACP server
-try {
-  ensurePaseoIntegration();
-} catch {}
+void ensurePaseoIntegration().catch(() => {});
 
 const server = new ACPServer();
 
