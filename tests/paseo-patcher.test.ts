@@ -38,7 +38,7 @@ describe("Paseo Patcher & Telemetry Integration", () => {
     expect(js).toContain("fetchUsage()");
 
     // Verify Windows-specific fixes
-    expect(js).toContain("BIN_CACHE_TTL_MS = 30000");
+    expect(js).toContain("BIN_CACHE_TTL_MS = 86400000");
     expect(js).toContain("cachedAgyBin");
     expect(js).toContain("exeCandidates = [");
     expect(js).toContain("shell: isBatch");

@@ -195,7 +195,7 @@ const execFileAsync = promisify(execFile);
 
 let cachedAgyBin = null;
 let cachedAgyBinTime = 0;
-const BIN_CACHE_TTL_MS = 30000;
+const BIN_CACHE_TTL_MS = 86400000; // 24 hours
 
 function resolveAgyBinary() {
     if (process.env.AGY_BIN_PATH) return process.env.AGY_BIN_PATH;

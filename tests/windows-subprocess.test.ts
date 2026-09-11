@@ -119,7 +119,7 @@ describe("Windows Subprocess & Zero-Console Execution", () => {
       expect(forced).toBe("/other/path/agy.exe");
     });
 
-    it("re-resolves when cache expires after 30 seconds", () => {
+    it("re-resolves when cache expires after 24 hours", () => {
       const fakeBinary = path.join(tempDir, "agy.exe");
       fs.writeFileSync(fakeBinary, "binary");
       process.env.AGY_BIN_PATH = fakeBinary;
@@ -130,11 +130,13 @@ describe("Windows Subprocess & Zero-Console Execution", () => {
       const first = resolveDefaultAgyBinary();
       expect(first).toBe(fakeBinary);
 
-      currentTime += 10_000;
+      // Advance 12 hours (within 24h TTL) -> still cached
+      currentTime += 12 * 60 * 60 * 1000;
       process.env.AGY_BIN_PATH = "/new/path/agy.exe";
       expect(resolveDefaultAgyBinary()).toBe(fakeBinary);
 
-      currentTime += 21_000;
+      // Advance past 24 hours -> expires and re-resolves
+      currentTime += 13 * 60 * 60 * 1000;
       expect(resolveDefaultAgyBinary()).toBe("/new/path/agy.exe");
     });
 

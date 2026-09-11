@@ -16,7 +16,7 @@ import { buildAgyArgs, PermissionSettings, resolvePermissionSettings } from "./p
 
 let cachedBinaryPath: string | null = null;
 let lastBinaryResolveTime = 0;
-const BINARY_RESOLVE_TTL_MS = 30_000; // 30 seconds TTL
+export const BINARY_RESOLVE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours TTL
 
 export function clearBinaryResolutionCache(): void {
   cachedBinaryPath = null;
