@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { logger } from "./logger.js";
 import { saveBase64Image } from "./attachments.js";
+import { isWindowsBatchScript } from "./antigravity-process.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -449,11 +450,24 @@ function cacheProviderUsage(binaryPath: string, result: ProviderUsage, now: numb
   return result;
 }
 
-export function formatExecBinaryPath(binaryPath: string): string {
-  if (process.platform === "win32" && binaryPath.includes(" ") && !binaryPath.startsWith('"')) {
+export function formatExecBinaryPath(binaryPath: string, shell?: boolean): string {
+  const isWin = process.platform === "win32";
+  const needsShell = shell ?? (isWin && isWindowsBatchScript(binaryPath));
+  if (needsShell && isWin && binaryPath.includes(" ") && !binaryPath.startsWith('"')) {
     return `"${binaryPath}"`;
   }
   return binaryPath;
+}
+
+export interface ResolvedCommandExecution {
+  cmd: string;
+  shell: boolean;
+}
+
+export function resolveCommandExecution(binaryPath: string): ResolvedCommandExecution {
+  const isBatch = process.platform === "win32" && isWindowsBatchScript(binaryPath);
+  const cmd = isBatch && binaryPath.includes(" ") && !binaryPath.startsWith('"') ? `"${binaryPath}"` : binaryPath;
+  return { cmd, shell: isBatch };
 }
 
 export async function fetchAntigravityUsage(
@@ -470,21 +484,22 @@ export async function fetchAntigravityUsage(
     return cachedProviderUsage;
   }
 
-  const cmd = formatExecBinaryPath(binaryPath);
+  const isBatch = process.platform === "win32" && isWindowsBatchScript(binaryPath);
+  const cmd = isBatch && binaryPath.includes(" ") && !binaryPath.startsWith('"') ? `"${binaryPath}"` : binaryPath;
   try {
     const [usageResult, creditsResult] = await Promise.allSettled([
       execFileAsync(cmd, ["--print", "/usage"], {
         timeout: 8_000,
         maxBuffer: 1024 * 1024,
         env: process.env,
-        shell: process.platform === "win32",
+        shell: isBatch,
         windowsHide: true,
       }),
       execFileAsync(cmd, ["--print", "/credits"], {
         timeout: 8_000,
         maxBuffer: 1024 * 1024,
         env: process.env,
-        shell: process.platform === "win32",
+        shell: isBatch,
         windowsHide: true,
       }),
     ]);
@@ -613,13 +628,14 @@ export async function fetchAvailableModels(binaryPath: string = "agy", force = f
     return inFlightModelFetch;
   }
   inFlightModelFetch = (async () => {
-    const cmd = formatExecBinaryPath(binaryPath);
+    const isBatch = process.platform === "win32" && isWindowsBatchScript(binaryPath);
+    const cmd = isBatch && binaryPath.includes(" ") && !binaryPath.startsWith('"') ? `"${binaryPath}"` : binaryPath;
     try {
       const { stdout } = await execFileAsync(cmd, ["models"], {
         timeout: 10_000,
         env: process.env,
         maxBuffer: 4 * 1024 * 1024,
-        shell: process.platform === "win32",
+        shell: isBatch,
         windowsHide: true,
       });
       const parsed = parseAgyModelsOutput(stdout);

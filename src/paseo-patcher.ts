@@ -101,6 +101,8 @@ export function findPaseoServerInstallations(): string[] {
           path.join(path.dirname(paseoDir), "node_modules", "@getpaseo", "server"),
           path.join(paseoDir, "resources", "app.asar.unpacked", "node_modules", "@getpaseo", "server"),
           path.join(paseoDir, "resources", "app", "node_modules", "@getpaseo", "server"),
+          path.join(path.dirname(paseoDir), "resources", "app.asar.unpacked", "node_modules", "@getpaseo", "server"),
+          path.join(path.dirname(paseoDir), "resources", "app", "node_modules", "@getpaseo", "server"),
         ];
         for (const c of checks) {
           if (fs.existsSync(c)) candidates.add(path.resolve(c));
@@ -191,8 +193,18 @@ import { toneFromUsedPct, windowFromUsedPct, unavailableUsage } from "../usage.j
 
 const execFileAsync = promisify(execFile);
 
+let cachedAgyBin = null;
+let cachedAgyBinTime = 0;
+const BIN_CACHE_TTL_MS = 30000;
+
 function resolveAgyBinary() {
     if (process.env.AGY_BIN_PATH) return process.env.AGY_BIN_PATH;
+    const now = Date.now();
+    if (cachedAgyBin && (now - cachedAgyBinTime < BIN_CACHE_TTL_MS)) {
+        return cachedAgyBin;
+    }
+
+    let resolved = "agy";
     const home = os.homedir();
     if (home) {
         if (process.platform === "win32") {
@@ -201,35 +213,80 @@ function resolveAgyBinary() {
             const programFiles = process.env.ProgramFiles || "C:\\\\Program Files";
             const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\\\Program Files (x86)";
 
-            const candidates = [
-                path.join(home, ".local", "bin", "agy.exe"),
-                path.join(home, ".local", "bin", "agy.cmd"),
-                path.join(home, ".local", "bin", "agy.bat"),
-                path.join(appData, "npm", "agy.cmd"),
-                path.join(appData, "npm", "agy.exe"),
-                path.join(appData, "npm", "agy.bat"),
-                path.join(localAppData, "npm", "agy.cmd"),
-                path.join(localAppData, "npm", "agy.exe"),
-                path.join(localAppData, "Programs", "antigravity", "agy.exe"),
+            // Prioritize .exe candidates over .cmd / .bat
+            const exeCandidates = [
                 path.join(localAppData, "Programs", "Antigravity", "bin", "agy.exe"),
-                path.join(localAppData, "Microsoft", "WindowsApps", "agy.exe"),
+                path.join(localAppData, "Programs", "antigravity", "agy.exe"),
+                path.join(localAppData, "Programs", "Antigravity", "agy.exe"),
                 path.join(programFiles, "Antigravity", "bin", "agy.exe"),
                 path.join(programFilesX86, "Antigravity", "bin", "agy.exe"),
+                path.join(localAppData, "Microsoft", "WindowsApps", "agy.exe"),
+                path.join(home, ".local", "bin", "agy.exe"),
+                path.join(appData, "npm", "agy.exe"),
+                path.join(localAppData, "npm", "agy.exe"),
             ];
-            for (const cand of candidates) {
-                if (fs.existsSync(cand)) return cand;
+            for (const cand of exeCandidates) {
+                if (fs.existsSync(cand)) {
+                    resolved = cand;
+                    break;
+                }
             }
-            try {
-                const out = execFileSync("where.exe", ["agy"], { encoding: "utf-8", timeout: 2000, windowsHide: true }).trim();
-                const first = out.split(/\\r?\\n/)[0]?.trim();
-                if (first && fs.existsSync(first)) return first;
-            } catch {}
+
+            // Check where.exe agy and select first .exe
+            if (resolved === "agy") {
+                for (const target of ["agy", "agy.exe"]) {
+                    try {
+                        const out = execFileSync("where.exe", [target], { encoding: "utf-8", timeout: 2000, windowsHide: true }).trim();
+                        const lines = out.split(/\\r?\\n/).map(l => l.trim()).filter(Boolean);
+                        const firstExe = lines.find(l => /\\.exe$/i.test(l) && fs.existsSync(l));
+                        if (firstExe) {
+                            resolved = firstExe;
+                            break;
+                        }
+                    } catch {}
+                }
+            }
+
+            // Fallback to batch scripts (.cmd / .bat) if no .exe found
+            if (resolved === "agy") {
+                const batchCandidates = [
+                    path.join(appData, "npm", "agy.cmd"),
+                    path.join(localAppData, "npm", "agy.cmd"),
+                    path.join(home, ".local", "bin", "agy.cmd"),
+                    path.join(appData, "npm", "agy.bat"),
+                    path.join(localAppData, "npm", "agy.bat"),
+                    path.join(home, ".local", "bin", "agy.bat"),
+                ];
+                for (const cand of batchCandidates) {
+                    if (fs.existsSync(cand)) {
+                        resolved = cand;
+                        break;
+                    }
+                }
+            }
+
+            if (resolved === "agy") {
+                for (const target of ["agy", "agy.cmd", "agy.bat"]) {
+                    try {
+                        const out = execFileSync("where.exe", [target], { encoding: "utf-8", timeout: 2000, windowsHide: true }).trim();
+                        const lines = out.split(/\\r?\\n/).map(l => l.trim()).filter(Boolean);
+                        const firstAny = lines.find(l => /\\.(cmd|bat)$/i.test(l) && fs.existsSync(l));
+                        if (firstAny) {
+                            resolved = firstAny;
+                            break;
+                        }
+                    } catch {}
+                }
+            }
         } else {
             const localPath = path.join(home, ".local", "bin", "agy");
-            if (fs.existsSync(localPath)) return localPath;
+            if (fs.existsSync(localPath)) resolved = localPath;
         }
     }
-    return "agy";
+
+    cachedAgyBin = resolved;
+    cachedAgyBinTime = now;
+    return resolved;
 }
 
 export class AntigravityQuotaProvider {
@@ -243,20 +300,22 @@ export class AntigravityQuotaProvider {
     async fetchUsage() {
         try {
             const isWin = process.platform === "win32";
-            let bin = this.binaryPath;
-            if (isWin && bin.includes(" ") && !bin.startsWith('"')) {
-                bin = \`"\${bin}"\`;
-            }
+            const bin = resolveAgyBinary();
+            this.binaryPath = bin;
+            const isBatch = isWin && /\\.(cmd|bat)$/i.test(bin);
             const [usageRes, creditsRes] = await Promise.allSettled([
-                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/usage"], { timeout: 15000, env: process.env, shell: isWin, windowsHide: true }),
-                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/credits"], { timeout: 15000, env: process.env, shell: isWin, windowsHide: true }),
+                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/usage"], { timeout: 15000, env: process.env, shell: isBatch, windowsHide: true }),
+                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/credits"], { timeout: 15000, env: process.env, shell: isBatch, windowsHide: true }),
             ]);
 
-            const usageOut = usageRes.status === "fulfilled" ? usageRes.value.stdout || usageRes.value.stderr : "";
-            const creditsOut = creditsRes.status === "fulfilled" ? creditsRes.value.stdout || creditsRes.value.stderr : "";
+            const rawUsageOut = usageRes.status === "fulfilled" ? usageRes.value.stdout || usageRes.value.stderr : "";
+            const rawCreditsOut = creditsRes.status === "fulfilled" ? creditsRes.value.stdout || creditsRes.value.stderr : "";
+
+            const usageOut = (rawUsageOut || "").replace(/\\r\\n/g, "\\n");
+            const creditsOut = (rawCreditsOut || "").replace(/\\r\\n/g, "\\n");
 
             const rawWindows = [];
-            for (const line of usageOut.split(/[\\r\\n]+/)) {
+            for (const line of usageOut.split("\\n")) {
                 const trimmed = line.trim();
                 if (!trimmed || trimmed.toLowerCase().startsWith("quota:")) continue;
 
@@ -374,7 +433,7 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
           if (e.isDirectory() && e.name !== "node_modules") {
             const found = findManifest(full);
             if (found) return found;
-          } else if (e.isFile() && e.name === "manifest.js" && dir.includes("quota-fetcher")) {
+          } else if (e.isFile() && e.name === "manifest.js" && dir.replace(/\\/g, "/").includes("quota-fetcher")) {
             return full;
           }
         }
@@ -406,9 +465,9 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
 
       if (!manifestCode.includes('providerId: "antigravity"')) {
         const entryToAdd = `    {\n        providerId: "antigravity",\n        create: (options) => new AntigravityQuotaProvider({\n            logger: options.logger,\n            fetch: options.fetch,\n        }),\n    },\n`;
-        const marker = "export const PROVIDER_USAGE_FETCHERS = [";
-        if (manifestCode.includes(marker)) {
-          manifestCode = manifestCode.replace(marker, `${marker}\n${entryToAdd}`);
+        const fetcherArrayRegex = /export\s+const\s+PROVIDER_USAGE_FETCHERS\s*=\s*\[/;
+        if (fetcherArrayRegex.test(manifestCode)) {
+          manifestCode = manifestCode.replace(fetcherArrayRegex, (match) => `${match}\n${entryToAdd}`);
           manifestModified = true;
         }
       }
@@ -467,23 +526,41 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
         if (oldMapRegex.test(acpCode)) {
           acpCode = acpCode.replace(oldMapRegex, newMap);
           acpModified = true;
+        } else {
+          const mapMatch = acpCode.match(/export\s+function\s+mapACPUsage\s*\([^)]*\)\s*\{/);
+          if (mapMatch && mapMatch.index !== undefined) {
+            const mapStart = mapMatch.index;
+            const openBrace = acpCode.indexOf("{", mapStart);
+            let depth = 1;
+            let i = openBrace + 1;
+            while (i < acpCode.length && depth > 0) {
+              if (acpCode[i] === "{") depth++;
+              else if (acpCode[i] === "}") depth--;
+              i++;
+            }
+            if (depth === 0) {
+              acpCode = acpCode.slice(0, mapStart) + newMap + acpCode.slice(i);
+              acpModified = true;
+            }
+          }
         }
       }
 
       // Patch handleUsageUpdate
-      if (acpCode.includes("handleUsageUpdate(update) {") && (!acpCode.includes("this.deliverTranslatedEvents") || acpCode.includes("this.notifySubscribers"))) {
-        const startIdx = acpCode.indexOf("handleUsageUpdate");
-        const openBrace = acpCode.indexOf("{", startIdx);
-        if (startIdx !== -1 && openBrace !== -1) {
-          let depth = 1;
-          let i = openBrace + 1;
-          while (i < acpCode.length && depth > 0) {
-            if (acpCode[i] === "{") depth++;
-            else if (acpCode[i] === "}") depth--;
-            i++;
-          }
-          if (depth === 0) {
-            const newHandler = `handleUsageUpdate(update) {
+      if (acpCode.includes("handleUsageUpdate") && (!acpCode.includes("this.deliverTranslatedEvents") || acpCode.includes("this.notifySubscribers"))) {
+        const startIdx = acpCode.search(/\bhandleUsageUpdate\s*\(/);
+        if (startIdx !== -1) {
+          const openBrace = acpCode.indexOf("{", startIdx);
+          if (openBrace !== -1) {
+            let depth = 1;
+            let i = openBrace + 1;
+            while (i < acpCode.length && depth > 0) {
+              if (acpCode[i] === "{") depth++;
+              else if (acpCode[i] === "}") depth--;
+              i++;
+            }
+            if (depth === 0) {
+              const newHandler = `handleUsageUpdate(update) {
         if (!update) return;
         const usage = mapACPUsage(update);
         if (usage) {
@@ -501,8 +578,9 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
             }
         }
     }`;
-            acpCode = acpCode.slice(0, startIdx) + newHandler + acpCode.slice(i);
-            acpModified = true;
+              acpCode = acpCode.slice(0, startIdx) + newHandler + acpCode.slice(i);
+              acpModified = true;
+            }
           }
         }
       }
@@ -541,9 +619,12 @@ export function findPaseoAsarPaths(): string[] {
 
     const winAsarLocations = [
       path.join(localAppData, "Programs", "Paseo", "resources", "app.asar"),
+      path.join(localAppData, "Programs", "paseo", "resources", "app.asar"),
       path.join(localAppData, "Paseo", "resources", "app.asar"),
       path.join(programFiles, "Paseo", "resources", "app.asar"),
+      path.join(programFiles, "paseo", "resources", "app.asar"),
       path.join(programFilesX86, "Paseo", "resources", "app.asar"),
+      path.join(programFilesX86, "paseo", "resources", "app.asar"),
       path.join(appData, "Paseo", "resources", "app.asar"),
     ];
 
@@ -558,8 +639,12 @@ export function findPaseoAsarPaths(): string[] {
         windowsHide: true,
       }).trim();
       for (const line of whereOut.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
-        const asarCandidate = path.join(path.dirname(line), "resources", "app.asar");
-        if (fs.existsSync(asarCandidate)) candidates.add(path.resolve(asarCandidate));
+        const asarCandidate1 = path.join(path.dirname(line), "resources", "app.asar");
+        const asarCandidate2 = path.resolve(path.dirname(line), "..", "resources", "app.asar");
+        const asarCandidate3 = path.resolve(line, "..", "..", "resources", "app.asar");
+        for (const cand of [asarCandidate1, asarCandidate2, asarCandidate3]) {
+          if (fs.existsSync(cand)) candidates.add(path.resolve(cand));
+        }
       }
     } catch {}
   } else if (process.platform === "darwin") {
@@ -624,7 +709,8 @@ export async function patchPaseoAsar(
           for (const ent of entries) {
             if (ent.isDirectory()) {
               const full = path.join(current, ent.name);
-              if (ent.name === "server" && full.includes(path.join("@getpaseo", "server"))) {
+              const normalizedFull = full.replace(/\\/g, "/");
+              if (ent.name === "server" && normalizedFull.includes("@getpaseo/server")) {
                 serverDir = full;
                 break;
               }
@@ -656,16 +742,37 @@ export async function patchPaseoAsar(
     // Create backup if not already present
     const backupPath = `${asarPath}.bak`;
     if (!fs.existsSync(backupPath)) {
-      fs.copyFileSync(asarPath, backupPath);
-      changes.push(`Backed up original asar to ${backupPath}`);
+      try {
+        fs.copyFileSync(asarPath, backupPath);
+        changes.push(`Backed up original asar to ${backupPath}`);
+      } catch (backupErr) {
+        logger.warn(`Could not create asar backup at ${backupPath}`, { error: String(backupErr) });
+      }
     }
 
     tempAsar = path.join(os.tmpdir(), `app-${Date.now()}.asar`);
     await asar.createPackage(tempDir, tempAsar);
 
-    // Replace original archive
-    fs.copyFileSync(tempAsar, asarPath);
-    changes.push(`Repacked updated asar archive at ${asarPath}`);
+    // Replace original archive with locked file handling for Windows
+    try {
+      fs.copyFileSync(tempAsar, asarPath);
+      changes.push(`Repacked updated asar archive at ${asarPath}`);
+    } catch (copyErr: any) {
+      if (copyErr && (copyErr.code === "EBUSY" || copyErr.code === "EPERM" || copyErr.code === "EACCES")) {
+        const oldPath = `${asarPath}.old-${Date.now()}`;
+        try {
+          fs.renameSync(asarPath, oldPath);
+          fs.copyFileSync(tempAsar, asarPath);
+          changes.push(`Repacked updated asar archive at ${asarPath} (safe replaced locked file, moved previous to ${oldPath})`);
+        } catch (renameErr) {
+          throw new Error(
+            `Cannot update ${asarPath}: file is locked by a running Paseo process (${copyErr.code}). Please close Paseo completely (Paseo.exe in system tray / Task Manager) and retry.`
+          );
+        }
+      } else {
+        throw copyErr;
+      }
+    }
 
     return { success: true, changes };
   } catch (err) {
@@ -735,4 +842,98 @@ export async function ensurePaseoIntegration(options?: {
     patchedAsarPaths,
     errors,
   };
+}
+
+/**
+ * Checks whether a @getpaseo/server installation directory is already patched
+ * for Antigravity quota and telemetry support.
+ */
+export function isPaseoServerPatched(serverDir: string): boolean {
+  try {
+    if (!fs.existsSync(serverDir)) return false;
+
+    const antigravityJsCandidates = [
+      path.join(serverDir, "dist", "server", "services", "quota-fetcher", "providers", "antigravity.js"),
+      path.join(serverDir, "dist", "services", "quota-fetcher", "providers", "antigravity.js"),
+    ];
+    let hasProvider = antigravityJsCandidates.some((p) => fs.existsSync(p));
+
+    if (!hasProvider && fs.existsSync(path.join(serverDir, "dist"))) {
+      const checkRecursive = (dir: string, depth = 0): boolean => {
+        if (depth > 5) return false;
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const e of entries) {
+            if (e.isDirectory() && e.name !== "node_modules") {
+              if (checkRecursive(path.join(dir, e.name), depth + 1)) return true;
+            } else if (e.isFile() && e.name === "antigravity.js" && dir.replace(/\\/g, "/").includes("quota-fetcher")) {
+              return true;
+            }
+          }
+        } catch {}
+        return false;
+      };
+      hasProvider = checkRecursive(path.join(serverDir, "dist"));
+    }
+
+    if (hasProvider) return true;
+
+    const manifestCandidates = [
+      path.join(serverDir, "dist", "server", "services", "quota-fetcher", "manifest.js"),
+      path.join(serverDir, "dist", "services", "quota-fetcher", "manifest.js"),
+    ];
+    for (const cand of manifestCandidates) {
+      if (fs.existsSync(cand)) {
+        const content = fs.readFileSync(cand, "utf-8");
+        if (content.includes('providerId: "antigravity"')) return true;
+      }
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks whether a Paseo app.asar archive is already patched with Antigravity telemetry.
+ */
+export async function isPaseoAsarPatched(asarPath: string): Promise<boolean> {
+  try {
+    if (!fs.existsSync(asarPath)) return false;
+    const asarModule = await import("@electron/asar");
+    const asar = (asarModule as any).default || asarModule;
+    const files: string[] = asar.listPackage(asarPath);
+    return files.some((f) => f.includes("antigravity.js"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Detects if Paseo Desktop is currently running on the host.
+ */
+export function isPaseoRunning(): boolean {
+  try {
+    if (process.platform === "win32") {
+      const out = execFileSync("tasklist.exe", ["/FI", "IMAGENAME eq Paseo*", "/NH"], {
+        encoding: "utf-8",
+        timeout: 3000,
+        windowsHide: true,
+      });
+      return /paseo/i.test(out) && !out.includes("INFO:") && !out.includes("No tasks");
+    } else {
+      const out = execFileSync("pgrep", ["-i", "-x", "paseo"], {
+        encoding: "utf-8",
+        timeout: 2000,
+      });
+      const pids = out
+        .split(/\r?\n/)
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((p) => !isNaN(p) && p !== process.pid);
+      return pids.length > 0;
+    }
+  } catch {
+    return false;
+  }
 }

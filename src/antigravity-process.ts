@@ -14,49 +14,124 @@ import {
 } from "./protocol.js";
 import { buildAgyArgs, PermissionSettings, resolvePermissionSettings } from "./permissions.js";
 
-export function resolveDefaultAgyBinary(): string {
-  if (process.env.AGY_BIN_PATH) return process.env.AGY_BIN_PATH;
-  const home = os.homedir();
-  if (home) {
-    if (process.platform === "win32") {
-      const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
-      const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
-      const programFiles = process.env.ProgramFiles || "C:\\Program Files";
-      const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+let cachedBinaryPath: string | null = null;
+let lastBinaryResolveTime = 0;
+const BINARY_RESOLVE_TTL_MS = 30_000; // 30 seconds TTL
 
-      const candidates = [
-        path.join(home, ".local", "bin", "agy.exe"),
-        path.join(home, ".local", "bin", "agy.cmd"),
-        path.join(home, ".local", "bin", "agy.bat"),
-        path.join(appData, "npm", "agy.cmd"),
-        path.join(appData, "npm", "agy.exe"),
-        path.join(appData, "npm", "agy.bat"),
-        path.join(localAppData, "npm", "agy.cmd"),
-        path.join(localAppData, "npm", "agy.exe"),
-        path.join(localAppData, "Programs", "antigravity", "agy.exe"),
-        path.join(localAppData, "Programs", "Antigravity", "bin", "agy.exe"),
-        path.join(localAppData, "Microsoft", "WindowsApps", "agy.exe"),
-        path.join(programFiles, "Antigravity", "bin", "agy.exe"),
-        path.join(programFilesX86, "Antigravity", "bin", "agy.exe"),
-      ];
-      for (const cand of candidates) {
-        if (fs.existsSync(cand)) return cand;
+export function clearBinaryResolutionCache(): void {
+  cachedBinaryPath = null;
+  lastBinaryResolveTime = 0;
+}
+
+export function isWindowsBatchScript(filePath: string): boolean {
+  return /\.(cmd|bat)$/i.test(filePath);
+}
+
+export function resolveDefaultAgyBinary(force = false): string {
+  const now = Date.now();
+  if (
+    !force &&
+    cachedBinaryPath &&
+    now - lastBinaryResolveTime < BINARY_RESOLVE_TTL_MS &&
+    (cachedBinaryPath === "agy" || fs.existsSync(cachedBinaryPath))
+  ) {
+    return cachedBinaryPath;
+  }
+
+  let resolved = "agy";
+  if (process.env.AGY_BIN_PATH) {
+    resolved = process.env.AGY_BIN_PATH;
+  } else {
+    const home = os.homedir();
+    if (home) {
+      if (process.platform === "win32") {
+        const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
+        const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
+        const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+        const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+
+        const exeCandidates = [
+          path.join(localAppData, "Programs", "Antigravity", "bin", "agy.exe"),
+          path.join(localAppData, "Programs", "antigravity", "agy.exe"),
+          path.join(localAppData, "Programs", "Antigravity", "agy.exe"),
+          path.join(programFiles, "Antigravity", "bin", "agy.exe"),
+          path.join(programFilesX86, "Antigravity", "bin", "agy.exe"),
+          path.join(localAppData, "Microsoft", "WindowsApps", "agy.exe"),
+          path.join(home, ".local", "bin", "agy.exe"),
+          path.join(appData, "npm", "agy.exe"),
+          path.join(localAppData, "npm", "agy.exe"),
+        ];
+        for (const cand of exeCandidates) {
+          if (fs.existsSync(cand)) {
+            resolved = cand;
+            break;
+          }
+        }
+
+        if (resolved === "agy") {
+          for (const target of ["agy", "agy.exe"]) {
+            try {
+              const out = execFileSync("where.exe", [target], {
+                encoding: "utf-8",
+                timeout: 2000,
+                windowsHide: true,
+              }).trim();
+              const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+              for (const line of lines) {
+                if (/\.exe$/i.test(line) && fs.existsSync(line)) {
+                  resolved = line;
+                  break;
+                }
+              }
+              if (resolved !== "agy") break;
+            } catch {}
+          }
+        }
+
+        if (resolved === "agy") {
+          const batchCandidates = [
+            path.join(appData, "npm", "agy.cmd"),
+            path.join(localAppData, "npm", "agy.cmd"),
+            path.join(home, ".local", "bin", "agy.cmd"),
+            path.join(appData, "npm", "agy.bat"),
+          ];
+          for (const cand of batchCandidates) {
+            if (fs.existsSync(cand)) {
+              resolved = cand;
+              break;
+            }
+          }
+
+          if (resolved === "agy") {
+            for (const target of ["agy", "agy.cmd", "agy.bat"]) {
+              try {
+                const out = execFileSync("where.exe", [target], {
+                  encoding: "utf-8",
+                  timeout: 2000,
+                  windowsHide: true,
+                }).trim();
+                const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+                for (const line of lines) {
+                  if (isWindowsBatchScript(line) && fs.existsSync(line)) {
+                    resolved = line;
+                    break;
+                  }
+                }
+                if (resolved !== "agy") break;
+              } catch {}
+            }
+          }
+        }
+      } else {
+        const localPath = path.join(home, ".local", "bin", "agy");
+        if (fs.existsSync(localPath)) resolved = localPath;
       }
-      try {
-        const out = execFileSync("where.exe", ["agy"], {
-          encoding: "utf-8",
-          timeout: 2000,
-          windowsHide: true,
-        }).trim();
-        const first = out.split(/\r?\n/)[0]?.trim();
-        if (first && fs.existsSync(first)) return first;
-      } catch {}
-    } else {
-      const localPath = path.join(home, ".local", "bin", "agy");
-      if (fs.existsSync(localPath)) return localPath;
     }
   }
-  return "agy";
+
+  cachedBinaryPath = resolved;
+  lastBinaryResolveTime = now;
+  return resolved;
 }
 
 export interface AntigravityProcessOptions {
@@ -318,12 +393,13 @@ export class AntigravityProcess extends EventEmitter {
     });
 
     const isWin = process.platform === "win32";
+    const isBatch = isWin && isWindowsBatchScript(this.binaryPath);
     const child = spawn(this.binaryPath, args, {
       cwd: this.cwd,
       env: this.env,
       stdio: ["pipe", "pipe", "pipe"],
       detached: !isWin,
-      shell: isWin,
+      shell: isBatch,
       windowsHide: true,
     });
     this.child = child;

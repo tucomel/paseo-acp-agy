@@ -7,6 +7,7 @@ import { logger } from "./logger.js";
 import { Session } from "./session.js";
 import { sessionStore } from "./session-store.js";
 import { formatExecBinaryPath } from "./protocol.js";
+import { isWindowsBatchScript } from "./antigravity-process.js";
 
 const execFileAsync = promisify(execFile);
 const AGY_COMMAND_TIMEOUT_MS = 30_000;
@@ -356,7 +357,8 @@ export function formatUsageOutput(rawText: string): string {
 }
 
 async function runAgySlash(binaryPath: string, cwd: string, slashCommand: string): Promise<string> {
-  const cmd = formatExecBinaryPath(binaryPath);
+  const isBatch = process.platform === "win32" && isWindowsBatchScript(binaryPath);
+  const cmd = isBatch && binaryPath.includes(" ") && !binaryPath.startsWith('"') ? `"${binaryPath}"` : binaryPath;
   const { stdout, stderr } = await execFileAsync(
     cmd,
     ["--print-timeout", "24h", "--print", slashCommand],
@@ -365,7 +367,7 @@ async function runAgySlash(binaryPath: string, cwd: string, slashCommand: string
       env: process.env,
       timeout: AGY_COMMAND_TIMEOUT_MS,
       maxBuffer: AGY_COMMAND_MAX_BUFFER,
-      shell: process.platform === "win32",
+      shell: isBatch,
       windowsHide: true,
     }
   );
