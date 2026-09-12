@@ -13,6 +13,7 @@ import {
   isPaseoAsarPatched,
   isPaseoRunning,
 } from "../src/paseo-patcher.js";
+import { createPackage, listPackage } from "../src/asar.js";
 
 describe("Paseo Patcher & Telemetry Integration", () => {
   let tempDir: string;
@@ -162,9 +163,6 @@ export const PROVIDER_USAGE_FETCHERS = [
   });
 
   it("should extract, patch, and repack a Paseo app.asar package", async () => {
-    const asarModule = await import("@electron/asar");
-    const asar = asarModule.default || asarModule;
-
     // Create a mock asar source directory
     const asarSrcDir = path.join(tempDir, "mock-app");
     const quotaDir = path.join(asarSrcDir, "node_modules", "@getpaseo", "server", "dist", "server", "services", "quota-fetcher");
@@ -184,7 +182,7 @@ export const PROVIDER_USAGE_FETCHERS = [
     );
 
     const asarPath = path.join(tempDir, "app.asar");
-    await asar.createPackage(asarSrcDir, asarPath);
+    await createPackage(asarSrcDir, asarPath);
 
     const patchRes = await patchPaseoAsar(asarPath);
     expect(patchRes.success).toBe(true);
@@ -194,8 +192,7 @@ export const PROVIDER_USAGE_FETCHERS = [
     expect(fs.existsSync(`${asarPath}.bak`)).toBe(true);
 
     // Verify asar package now contains the antigravity provider
-    try { asar.uncache(asarPath); } catch {}
-    const files = asar.listPackage(asarPath);
+    const files = listPackage(asarPath);
     expect(files.some((f: string) => f.includes("antigravity.js"))).toBe(true);
 
     // Verify isPaseoAsarPatched reports true
@@ -218,14 +215,11 @@ export const PROVIDER_USAGE_FETCHERS = [
   });
 
   it("should accurately report isPaseoAsarPatched status", async () => {
-    const asarModule = await import("@electron/asar");
-    const asar = asarModule.default || asarModule;
-
     const asarSrcDir = path.join(tempDir, "mock-app-unpatched");
     fs.mkdirSync(asarSrcDir, { recursive: true });
     fs.writeFileSync(path.join(asarSrcDir, "index.js"), "console.log('hello');");
     const asarPath = path.join(tempDir, "unpatched.asar");
-    await asar.createPackage(asarSrcDir, asarPath);
+    await createPackage(asarSrcDir, asarPath);
 
     expect(await isPaseoAsarPatched(asarPath)).toBe(false);
   });
@@ -236,16 +230,13 @@ export const PROVIDER_USAGE_FETCHERS = [
   });
 
   it("should safely handle locked app.asar on Windows via rename retry strategy", async () => {
-    const asarModule = await import("@electron/asar");
-    const asar = asarModule.default || asarModule;
-
     const asarSrcDir = path.join(tempDir, "mock-app-locked");
     const quotaDir = path.join(asarSrcDir, "node_modules", "@getpaseo", "server", "dist", "server", "services", "quota-fetcher");
     fs.mkdirSync(quotaDir, { recursive: true });
     fs.writeFileSync(path.join(quotaDir, "manifest.js"), `export const PROVIDER_USAGE_FETCHERS = [];`);
 
     const asarPath = path.join(tempDir, "locked.asar");
-    await asar.createPackage(asarSrcDir, asarPath);
+    await createPackage(asarSrcDir, asarPath);
 
     // Spy on fs.copyFileSync to simulate EBUSY on initial replace
     const originalCopyFileSync = fs.copyFileSync;
@@ -276,16 +267,13 @@ export const PROVIDER_USAGE_FETCHERS = [
   });
 
   it("should report clear error when both copy and rename fail due to process locking", async () => {
-    const asarModule = await import("@electron/asar");
-    const asar = asarModule.default || asarModule;
-
     const asarSrcDir = path.join(tempDir, "mock-app-locked-hard");
     const quotaDir = path.join(asarSrcDir, "node_modules", "@getpaseo", "server", "dist", "server", "services", "quota-fetcher");
     fs.mkdirSync(quotaDir, { recursive: true });
     fs.writeFileSync(path.join(quotaDir, "manifest.js"), `export const PROVIDER_USAGE_FETCHERS = [];`);
 
     const asarPath = path.join(tempDir, "locked-hard.asar");
-    await asar.createPackage(asarSrcDir, asarPath);
+    await createPackage(asarSrcDir, asarPath);
 
     vi.spyOn(fs, "copyFileSync").mockImplementation((src, dest) => {
       if (dest === asarPath) {

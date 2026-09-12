@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { logger } from "./logger.js";
+import { extractAll, createPackage, listPackage } from "./asar.js";
 
 export interface PatchResult {
   found: boolean;
@@ -170,7 +171,11 @@ export function findPaseoServerInstallations(): string[] {
 
   // Filter out any paths that do not actually have a dist directory or package.json
   const verified: string[] = [];
+  const seen = new Set<string>();
   for (const dir of candidates) {
+    const key = process.platform === "win32" ? dir.toLowerCase() : dir;
+    if (seen.has(key)) continue;
+    seen.add(key);
     if (fs.existsSync(path.join(dir, "dist")) || fs.existsSync(path.join(dir, "package.json"))) {
       verified.push(dir);
     }
@@ -666,7 +671,16 @@ export function findPaseoAsarPaths(): string[] {
     }
   }
 
-  return Array.from(candidates);
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const loc of candidates) {
+    const key = process.platform === "win32" ? loc.toLowerCase() : loc;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(loc);
+    }
+  }
+  return result;
 }
 
 /**
@@ -685,12 +699,8 @@ export async function patchPaseoAsar(
       return { success: false, changes: [], error: `Asar archive not found: ${asarPath}` };
     }
 
-    // Dynamic import of @electron/asar
-    const asarModule = await import("@electron/asar");
-    const asar = (asarModule as any).default || asarModule;
-
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paseo-asar-extract-"));
-    asar.extractAll(asarPath, tempDir);
+    extractAll(asarPath, tempDir);
 
     // Look for server directory in extracted files
     const serverCandidates = [
@@ -751,7 +761,7 @@ export async function patchPaseoAsar(
     }
 
     tempAsar = path.join(os.tmpdir(), `app-${Date.now()}.asar`);
-    await asar.createPackage(tempDir, tempAsar);
+    await createPackage(tempDir, tempAsar);
 
     // Replace original archive with locked file handling for Windows
     try {
@@ -901,9 +911,7 @@ export function isPaseoServerPatched(serverDir: string): boolean {
 export async function isPaseoAsarPatched(asarPath: string): Promise<boolean> {
   try {
     if (!fs.existsSync(asarPath)) return false;
-    const asarModule = await import("@electron/asar");
-    const asar = (asarModule as any).default || asarModule;
-    const files: string[] = asar.listPackage(asarPath);
+    const files = listPackage(asarPath);
     return files.some((f) => f.includes("antigravity.js"));
   } catch {
     return false;

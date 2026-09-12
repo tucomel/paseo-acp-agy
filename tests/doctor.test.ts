@@ -56,6 +56,6 @@ describe("Doctor Diagnostic CLI", () => {
 
     expect(out).toContain("npx -y paseo-acp-agy doctor");
     expect(out).toContain("doctor         Diagnose Antigravity binary, quota provider, and Paseo status");
-    expect(out).toContain("--doctor       Run environment, binary, and telemetry diagnostics");
+    expect(out).toContain("--doctor          Run environment, binary, and telemetry diagnostics");
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "paseo-acp-agy",
-  "version": "1.1.9",
+  "version": "1.2.0",
   "description": "ACP (Agent Client Protocol) provider for Google Antigravity in Paseo and Zed",
   "type": "module",
   "main": "dist/index.js",
@@ -43,10 +43,11 @@
   "bugs": {
     "url": "https://github.com/tucomel/paseo-acp-agy/issues"
   },
-  "homepage": "https://github.com/tucomel/paseo-acp-agy#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.17.1",
-    "@electron/asar": "^4.3.0"
+    "@agentclientprotocol/sdk": "^0.17.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
