@@ -42,18 +42,22 @@ Commands:
   doctor         Diagnose Antigravity binary, quota provider, and Paseo status
 
 Options:
-  --acp          Start ACP server over stdio (default)
-  --setup        Integrate Antigravity with local Paseo server installation
-  --doctor       Run environment, binary, and telemetry diagnostics
-  -v, --version  Show version
-  --json         Show version in JSON format (with --version)
-  -h, --help     Show help
+  --acp             Start ACP server over stdio (default)
+  --setup           Integrate Antigravity with local Paseo server installation
+  --doctor          Run environment, binary, and telemetry diagnostics
+  --skip-naration   Drop leading narration-only assistant chunks (e.g. 'I will...')
+  --skip-narration  Alias for --skip-naration
+  -v, --version     Show version
+  --json            Show version in JSON format (with --version)
+  -h, --help        Show help
 
 Environment Variables:
   AGY_ACP_LOG_LEVEL                 debug | info | warn | error (default: info)
   AGY_ACP_LOG_DIR                   Directory for log files
   AGY_ACP_SANDBOX                   Set to 'true' to run agy in sandbox mode
   AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS Set to 'true' to auto-approve tool permissions
+  AGY_ACP_SKIP_NARRATION            Set to 'true' to drop leading narration chunks
+  AGY_EXTRA_ARGS                    Extra space-separated CLI arguments passed to agy
   AGY_BIN_PATH                      Path to agy binary (default: agy in PATH or ~/.local/bin/agy)
   PASEO_SERVER_PATH                 Path to local @getpaseo/server directory
   PASEO_ASAR_PATH                   Path to local Paseo app.asar package
@@ -259,7 +263,12 @@ if (
 // Auto-run integration in background when starting ACP server
 void ensurePaseoIntegration().catch(() => {});
 
-const server = new ACPServer();
+const skipNarration =
+  args.includes("--skip-naration") ||
+  args.includes("--skip-narration") ||
+  process.env.AGY_ACP_SKIP_NARRATION === "true";
+
+const server = new ACPServer({ skipNarration });
 
 const cleanup = async () => {
   try {

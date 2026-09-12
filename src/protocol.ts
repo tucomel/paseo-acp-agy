@@ -137,10 +137,13 @@ export const ACP_METHODS = {
   SESSION_CLOSE: "session/close",
   SESSION_CLOSE_ALIAS: "unstable_closeSession",
   SESSION_SET_MODE: "session/set_mode",
+  SESSION_SET_MODE_CAMEL: "session/setMode",
   SESSION_SET_MODE_ALIAS: "setSessionMode",
   SESSION_SET_MODEL: "session/set_model",
+  SESSION_SET_MODEL_CAMEL: "session/setModel",
   SESSION_SET_MODEL_ALIAS: "unstable_setSessionModel",
   SESSION_SET_CONFIG_OPTION: "session/set_config_option",
+  SESSION_SET_CONFIG_OPTION_CAMEL: "session/setConfigOption",
   SESSION_SET_CONFIG_OPTION_ALIAS: "setSessionConfigOption",
   SESSION_UPDATE: "session/update",
 } as const;
@@ -675,6 +678,13 @@ export function getEffectiveEffortForModel(
 export const AVAILABLE_MODES = [
   { id: "default", name: "Default (Accept Edits)", description: "Standard autonomous execution and coding mode" },
   { id: "plan", name: "Plan Mode", description: "Planning and read-only analysis without file modifications" },
+  { id: "accept-edits", name: "Accept Edits", description: "Run agy with --mode accept-edits" },
+];
+
+export const AVAILABLE_PERMISSIONS = [
+  { id: "default", name: "Default", description: "Standard permission flow" },
+  { id: "sandbox", name: "Sandbox", description: "Run agy with --sandbox" },
+  { id: "bypass", name: "Bypass", description: "Run agy with --dangerously-skip-permissions" },
 ];
 
 export function buildConfigOptionsForModel(
@@ -706,4 +716,140 @@ export function buildConfigOptionsForModel(
       options,
     },
   ];
+}
+
+export function buildConfigOptionsForSession(options: {
+  modelId: string;
+  currentEffort?: string;
+  currentMode?: string;
+  currentPermission?: string;
+  availableModels?: ModelDefinition[];
+}) {
+  const modelOptions = buildConfigOptionsForModel(
+    options.modelId,
+    options.currentEffort,
+    options.availableModels
+  );
+
+  const modeOption = {
+    id: "mode",
+    name: "Execution Mode",
+    category: "mode",
+    type: "select" as const,
+    currentValue: options.currentMode || "default",
+    options: AVAILABLE_MODES.map((m) => ({
+      value: m.id,
+      name: m.name,
+      description: m.description,
+    })),
+  };
+
+  const permissionOption = {
+    id: "permission",
+    name: "Permission Policy",
+    category: "permission",
+    type: "select" as const,
+    currentValue: options.currentPermission || "default",
+    options: AVAILABLE_PERMISSIONS.map((p) => ({
+      value: p.id,
+      name: p.name,
+      description: p.description,
+    })),
+  };
+
+  return [...modelOptions, modeOption, permissionOption];
+}
+
+/**
+ * Escapes characters in URLs/paths for Markdown image/link syntax.
+ * Escapes backslashes `\` and parentheses `)` to prevent premature link termination,
+ * especially crucial for Windows paths (e.g. C:\path\img (1).png).
+ */
+export function escapeMarkdownUrl(urlOrPath: string): string {
+  return urlOrPath.replace(/\\/g, "\\\\").replace(/\)/g, "\\)");
+}
+
+/**
+ * Normalizes an image path or file URL and formats it as an inline Markdown image link.
+ */
+export function formatImageMarkdown(filePathOrUrl: string): string {
+  let clean = filePathOrUrl.trim();
+  if (clean.startsWith("file://")) {
+    try {
+      clean = fileURLToPath(clean);
+    } catch {
+      clean = clean.replace(/^file:\/\//, "");
+      if (process.platform === "win32" && /^\/[a-zA-Z]:/.test(clean)) {
+        clean = clean.slice(1);
+      }
+    }
+  }
+  return `![Generated image](${escapeMarkdownUrl(clean)})`;
+}
+
+/**
+ * Extracts an image reference from a tool execution output or parameters,
+ * returning a formatted Markdown image string if detected.
+ */
+export function extractImageMarkdownLink(
+  toolName: string,
+  output: unknown,
+  parameters?: Record<string, unknown>
+): string | null {
+  const name = toolName.toLowerCase();
+  const isImageTool = name.includes("image") || name.includes("generate_image");
+
+  let rawPath: string | null = null;
+
+  if (typeof output === "string") {
+    const fileUriMatch = output.match(/file:\/\/[^\s)"]+\.(png|jpe?g|webp|gif|svg|bmp)/i);
+    if (fileUriMatch) {
+      rawPath = fileUriMatch[0];
+    } else {
+      const winPathMatch = output.match(/[a-zA-Z]:\\[^\s)"]+\.(png|jpe?g|webp|gif|svg|bmp)/i);
+      if (winPathMatch) {
+        rawPath = winPathMatch[0];
+      } else {
+        const posixPathMatch = output.match(/\/[^\s)"]+\.(png|jpe?g|webp|gif|svg|bmp)/i);
+        if (posixPathMatch) {
+          rawPath = posixPathMatch[0];
+        }
+      }
+    }
+  } else if (output && typeof output === "object") {
+    const obj = output as Record<string, unknown>;
+    if (typeof obj.path === "string") rawPath = obj.path;
+    else if (typeof obj.filePath === "string") rawPath = obj.filePath;
+    else if (typeof obj.uri === "string") rawPath = obj.uri;
+  }
+
+  if (!rawPath && isImageTool && parameters) {
+    if (
+      typeof parameters.TargetFile === "string" &&
+      /\.(png|jpe?g|webp|gif|svg|bmp)$/i.test(parameters.TargetFile)
+    ) {
+      rawPath = parameters.TargetFile;
+    }
+  }
+
+  if (!rawPath) return null;
+  return formatImageMarkdown(rawPath);
+}
+
+/**
+ * Detects whether text consists entirely of conversational narration (e.g. "I will...", "I'll...").
+ */
+export function isNarrationText(text: string): boolean {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return false;
+  return lines.every((l) => {
+    const lower = l.toLowerCase();
+    return (
+      lower.startsWith("i will") ||
+      lower.startsWith("i'll") ||
+      lower.startsWith("i’ll") ||
+      lower.startsWith("let me") ||
+      lower.startsWith("i am going to")
+    );
+  });
 }

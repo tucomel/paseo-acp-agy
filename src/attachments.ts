@@ -8,6 +8,9 @@ const DEFAULT_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 function getStateRoot(): string {
   if (process.env.AGY_ACP_STATE_DIR) return process.env.AGY_ACP_STATE_DIR;
+  if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, "agy-acp");
+  }
   const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
   return path.join(stateHome, "agy-acp");
 }

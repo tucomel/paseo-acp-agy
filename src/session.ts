@@ -16,6 +16,7 @@ export interface SessionOptions {
   model?: string;
   effort?: string;
   mode?: string;
+  permission?: string;
   conversationId?: string;
   usage?: SessionUsageState;
   sandbox?: boolean;
@@ -31,6 +32,7 @@ export class Session {
   public model: string;
   public effort: string;
   public mode: string;
+  public permission: string;
   public readonly createdAt: Date;
   public lastActivity: Date;
   public isCancelled = false;
@@ -45,6 +47,9 @@ export class Session {
     this.model = options.model || "gemini-3.7-flash";
     this.effort = options.effort || "high";
     this.mode = options.mode || "default";
+    this.permission =
+      options.permission ||
+      (options.sandbox ? "sandbox" : options.dangerouslySkipPermissions ? "bypass" : "default");
     this.createdAt = new Date();
     this.lastActivity = new Date();
     this.store = options.store || sessionStore;
@@ -58,9 +63,12 @@ export class Session {
       contextWindowMaxTokens: getModelContextWindow(this.model),
     };
 
+    const isSandbox = this.permission === "sandbox" || options.sandbox;
+    const isBypass = this.permission === "bypass" || options.dangerouslySkipPermissions;
+
     const permissions = resolvePermissionSettings({
-      sandbox: options.sandbox,
-      dangerouslySkipPermissions: options.dangerouslySkipPermissions,
+      sandbox: isSandbox,
+      dangerouslySkipPermissions: isBypass,
       mode: this.mode,
     });
 
@@ -88,6 +96,7 @@ export class Session {
       model: this.model,
       effort: this.effort,
       mode: this.mode,
+      permission: this.permission,
       usage: this.usage,
       updatedAt: new Date().toISOString(),
     };
@@ -128,6 +137,18 @@ export class Session {
   setMode(mode: string) {
     this.mode = mode;
     this.process.setMode(mode);
+    this.persist();
+  }
+
+  setPermission(permission: string) {
+    this.permission = permission;
+    const isSandbox = permission === "sandbox";
+    const isBypass = permission === "bypass";
+    this.process.setPermissions({
+      sandbox: isSandbox,
+      dangerouslySkipPermissions:
+        isBypass || (!isSandbox && this.process.currentPermissions.dangerouslySkipPermissions),
+    });
     this.persist();
   }
 
@@ -234,6 +255,7 @@ export class SessionManager {
       model: options.model || persisted?.model,
       effort: options.effort || persisted?.effort,
       mode: options.mode || persisted?.mode,
+      permission: options.permission || persisted?.permission,
       conversationId: options.conversationId || persisted?.conversationId,
       usage: options.usage || persisted?.usage,
       sandbox: options.sandbox,

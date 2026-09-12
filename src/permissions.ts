@@ -39,6 +39,13 @@ export function resolvePermissionSettings(options?: {
   };
 }
 
+export function parseExtraArgs(raw?: string): string[] {
+  if (!raw || !raw.trim()) return [];
+  const matches = raw.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
+  if (!matches) return [];
+  return matches.map((m) => m.replace(/^["']|["']$/g, ""));
+}
+
 export function buildAgyArgs(settings: PermissionSettings, extraArgs?: string[]): string[] {
   const args = ["--input-format", "stream-json", "--output-format", "stream-json", "--print="];
 
@@ -64,6 +71,11 @@ export function buildAgyArgs(settings: PermissionSettings, extraArgs?: string[])
         args.push("--add-dir", dir);
       }
     }
+  }
+
+  const envExtra = parseExtraArgs(process.env.AGY_EXTRA_ARGS);
+  if (envExtra.length > 0) {
+    args.push(...envExtra);
   }
 
   if (extraArgs && extraArgs.length > 0) {

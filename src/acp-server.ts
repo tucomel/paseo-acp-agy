@@ -7,10 +7,14 @@ import {
   JsonRpcErrorResponse,
   ACP_METHODS,
   AVAILABLE_MODES,
+  AVAILABLE_PERMISSIONS,
   fetchAvailableModels,
   buildConfigOptionsForModel,
+  buildConfigOptionsForSession,
   extractPromptText,
   mapToolNameToKind,
+  extractImageMarkdownLink,
+  isNarrationText,
   AgyStepUpdateEvent,
   AgyResultEvent,
   ModelDefinition,
@@ -40,6 +44,7 @@ export class ACPServer {
   private input: Readable;
   private output: Writable;
   private binaryPath: string;
+  private skipNarration: boolean;
   private rl: readline.Interface | null = null;
   private isRunning = false;
 
@@ -48,10 +53,13 @@ export class ACPServer {
     output?: Writable;
     sessionManager?: SessionManager;
     binaryPath?: string;
+    skipNarration?: boolean;
   } = {}) {
     this.input = options.input || process.stdin;
     this.output = options.output || process.stdout;
     this.binaryPath = options.binaryPath || resolveDefaultAgyBinary();
+    this.skipNarration =
+      options.skipNarration ?? (process.env.AGY_ACP_SKIP_NARRATION === "true");
     this.sessionManager =
       options.sessionManager || new SessionManager({ defaultBinaryPath: this.binaryPath });
   }
@@ -144,11 +152,13 @@ export class ACPServer {
         availableModels,
         currentModelId: session.model,
       },
-      configOptions: buildConfigOptionsForModel(
-        session.model,
-        session.effort,
-        availableModels
-      ),
+      configOptions: buildConfigOptionsForSession({
+        modelId: session.model,
+        currentEffort: session.effort,
+        currentMode: session.mode,
+        currentPermission: session.permission,
+        availableModels,
+      }),
     };
   }
 
@@ -395,11 +405,19 @@ export class ACPServer {
               break;
             }
 
+            let hasSentNonNarration = false;
             const onStepUpdate = (event: AgyStepUpdateEvent) => {
               const step = event.step_update;
               if (!step) return;
 
               if (step.step_type === "agent_response" && step.text_delta) {
+                if (this.skipNarration && !hasSentNonNarration) {
+                  if (isNarrationText(step.text_delta)) {
+                    logger.debug("Skipping pure narration text chunk", { delta: step.text_delta });
+                    return;
+                  }
+                  hasSentNonNarration = true;
+                }
                 this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                   sessionId: session.id,
                   update: {
@@ -408,6 +426,7 @@ export class ACPServer {
                   },
                 });
               } else if (step.step_type === "thought" && step.text_delta) {
+                hasSentNonNarration = true;
                 this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                   sessionId: session.id,
                   update: {
@@ -416,6 +435,7 @@ export class ACPServer {
                   },
                 });
               } else if (step.step_type === "tool" && step.tool_info) {
+                hasSentNonNarration = true;
                 const toolCallId = `tool_${step.step_index}`;
                 const toolName = step.tool_name || step.tool_info.name || "tool";
                 const toolKind = mapToolNameToKind(toolName);
@@ -440,6 +460,20 @@ export class ACPServer {
                       rawOutput: step.tool_info.output ?? "",
                     },
                   });
+                  const imageMarkdown = extractImageMarkdownLink(
+                    toolName,
+                    step.tool_info.output,
+                    step.tool_info.parameters as Record<string, unknown> | undefined
+                  );
+                  if (imageMarkdown) {
+                    this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                      sessionId: session.id,
+                      update: {
+                        sessionUpdate: "agent_message_chunk",
+                        content: { type: "text", text: `\n\n${imageMarkdown}\n\n` },
+                      },
+                    });
+                  }
                 } else if (step.state === "ERROR") {
                   this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                     sessionId: session.id,
@@ -565,6 +599,7 @@ export class ACPServer {
         }
 
         case ACP_METHODS.SESSION_SET_MODE:
+        case ACP_METHODS.SESSION_SET_MODE_CAMEL:
         case ACP_METHODS.SESSION_SET_MODE_ALIAS: {
           const sessionId = String(params.sessionId || "");
           const modeId = String(params.modeId || params.mode || "default");
@@ -583,6 +618,7 @@ export class ACPServer {
         }
 
         case ACP_METHODS.SESSION_SET_MODEL:
+        case ACP_METHODS.SESSION_SET_MODEL_CAMEL:
         case ACP_METHODS.SESSION_SET_MODEL_ALIAS: {
           const sessionId = String(params.sessionId || "");
           const session = this.requireSession(sessionId);
@@ -616,16 +652,19 @@ export class ACPServer {
 
           if (parsedModel.effort) session.setEffort(parsedModel.effort);
           session.setModel(model.modelId);
-          const configOptions = buildConfigOptionsForModel(
-            session.model,
-            session.effort,
-            models
-          );
+          const configOptions = buildConfigOptionsForSession({
+            modelId: session.model,
+            currentEffort: session.effort,
+            currentMode: session.mode,
+            currentPermission: session.permission,
+            availableModels: models,
+          });
           if (!isNotification) this.sendSuccess(id, { configOptions });
           break;
         }
 
         case ACP_METHODS.SESSION_SET_CONFIG_OPTION:
+        case ACP_METHODS.SESSION_SET_CONFIG_OPTION_CAMEL:
         case ACP_METHODS.SESSION_SET_CONFIG_OPTION_ALIAS: {
           const sessionId = String(params.sessionId || "");
           const configId = String(params.configId || "");
@@ -659,16 +698,32 @@ export class ACPServer {
             }
             session.setModel(value);
             logger.info("Updated model for session via config option", { sessionId, model: value });
+          } else if (configId === "mode") {
+            if (!AVAILABLE_MODES.some((candidate) => candidate.id === value)) {
+              if (!isNotification) this.sendError(id, -32602, `Unsupported mode: ${value}`);
+              break;
+            }
+            session.setMode(value);
+            logger.info("Updated mode for session via config option", { sessionId, mode: value });
+          } else if (configId === "permission") {
+            if (!AVAILABLE_PERMISSIONS.some((candidate) => candidate.id === value)) {
+              if (!isNotification) this.sendError(id, -32602, `Unsupported permission: ${value}`);
+              break;
+            }
+            session.setPermission(value);
+            logger.info("Updated permission for session via config option", { sessionId, permission: value });
           } else {
             if (!isNotification) this.sendError(id, -32602, `Unsupported config option: ${configId}`);
             break;
           }
 
-          const configOptions = buildConfigOptionsForModel(
-            session.model,
-            session.effort,
-            models
-          );
+          const configOptions = buildConfigOptionsForSession({
+            modelId: session.model,
+            currentEffort: session.effort,
+            currentMode: session.mode,
+            currentPermission: session.permission,
+            availableModels: models,
+          });
           if (!isNotification) this.sendSuccess(id, { configOptions });
           break;
         }

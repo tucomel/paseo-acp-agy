@@ -233,6 +233,15 @@ export class AntigravityProcess extends EventEmitter {
     }
   }
 
+  get currentPermissions(): PermissionSettings {
+    return this.permissions;
+  }
+
+  setPermissions(permissions: Partial<PermissionSettings>) {
+    this.permissions = { ...this.permissions, ...permissions };
+    this.scheduleRestart();
+  }
+
   setConversationId(conversationId?: string) {
     if (this.conversationId !== conversationId) {
       this.conversationId = conversationId;
