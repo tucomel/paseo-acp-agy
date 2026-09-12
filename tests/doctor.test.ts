@@ -1,10 +1,22 @@
-import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import { beforeAll, describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const entrypoint = path.resolve(__dirname, "..", "dist", "index.js");
+
+beforeAll(() => {
+  if (!fs.existsSync(entrypoint)) {
+    const tscBin = path.resolve(__dirname, "..", "node_modules", "typescript", "bin", "tsc");
+    execFileSync(process.execPath, [tscBin], {
+      cwd: path.resolve(__dirname, ".."),
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+  }
+});
 
 describe("Doctor Diagnostic CLI", () => {
   it("outputs diagnostic sections with doctor command", () => {

@@ -55,11 +55,11 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Run test suite
-        run: npm test
-
       - name: Build production bundle
         run: npm run build
+
+      - name: Run test suite
+        run: npm test
 
       - name: Publish to npm (Trusted Publishing via OIDC)
         run: npm publish --access public --provenance

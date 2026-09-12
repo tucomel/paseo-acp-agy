@@ -31,11 +31,11 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Run unit & protocol tests
-        run: npm test
-
       - name: Build distribution
         run: npm run build
+
+      - name: Run unit & protocol tests
+        run: npm test
 
       - name: Verify entrypoint execution
         run: |
