@@ -225,6 +225,11 @@ function resolveAgyBinary() {
                 path.join(localAppData, "Programs", "Antigravity", "agy.exe"),
                 path.join(programFiles, "Antigravity", "bin", "agy.exe"),
                 path.join(programFilesX86, "Antigravity", "bin", "agy.exe"),
+                path.join(localAppData, "Google", "Antigravity", "agy.exe"),
+                path.join(localAppData, "Google", "Antigravity", "bin", "agy.exe"),
+                path.join(home, ".antigravity", "bin", "agy.exe"),
+                path.join(home, ".antigravity", "agy.exe"),
+                path.join(home, ".gemini", "antigravity-cli", "bin", "agy.exe"),
                 path.join(localAppData, "Microsoft", "WindowsApps", "agy.exe"),
                 path.join(home, ".local", "bin", "agy.exe"),
                 path.join(appData, "npm", "agy.exe"),
@@ -258,6 +263,8 @@ function resolveAgyBinary() {
                     path.join(appData, "npm", "agy.cmd"),
                     path.join(localAppData, "npm", "agy.cmd"),
                     path.join(home, ".local", "bin", "agy.cmd"),
+                    path.join(home, ".antigravity", "bin", "agy.cmd"),
+                    path.join(home, ".gemini", "antigravity-cli", "bin", "agy.cmd"),
                     path.join(appData, "npm", "agy.bat"),
                     path.join(localAppData, "npm", "agy.bat"),
                     path.join(home, ".local", "bin", "agy.bat"),
@@ -307,13 +314,48 @@ export class AntigravityQuotaProvider {
             const isWin = process.platform === "win32";
             const bin = resolveAgyBinary();
             this.binaryPath = bin;
-            const isBatch = isWin && /\\.(cmd|bat)$/i.test(bin);
+            const isBatch = isWin && (!bin.toLowerCase().endsWith(".exe"));
+            const home = os.homedir();
+            const appData = process.env.APPDATA || (home ? path.join(home, "AppData", "Roaming") : "");
+            const localAppData = process.env.LOCALAPPDATA || (home ? path.join(home, "AppData", "Local") : "");
+            const programFiles = process.env.ProgramFiles || "C:\\\\Program Files";
+            const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\\\Program Files (x86)";
+
+            const extraPaths = isWin ? [
+                path.join(appData, "npm"),
+                path.join(localAppData, "npm"),
+                path.join(programFiles, "nodejs"),
+                path.join(programFilesX86, "nodejs"),
+                path.join(localAppData, "Programs", "Antigravity", "bin"),
+                path.join(localAppData, "Programs", "antigravity"),
+                path.join(home, ".antigravity", "bin"),
+                path.join(home, ".local", "bin"),
+            ].filter(p => fs.existsSync(p)) : [];
+
+            const env = { ...process.env };
+            if (extraPaths.length > 0) {
+                const currentPath = env.PATH || env.Path || "";
+                const newPath = (currentPath ? currentPath + ";" : "") + extraPaths.join(";");
+                env.PATH = newPath;
+                env.Path = newPath;
+            }
+
             const [usageRes, creditsRes] = await Promise.allSettled([
-                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/usage"], { timeout: 15000, env: process.env, shell: isBatch, windowsHide: true }),
-                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/credits"], { timeout: 15000, env: process.env, shell: isBatch, windowsHide: true }),
+                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/usage"], { timeout: 15000, env, shell: isBatch, windowsHide: true }),
+                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/credits"], { timeout: 15000, env, shell: isBatch, windowsHide: true }),
             ]);
 
-            const rawUsageOut = usageRes.status === "fulfilled" ? usageRes.value.stdout || usageRes.value.stderr : "";
+            if (usageRes.status === "rejected") {
+                const reason = usageRes.reason;
+                const msg = reason instanceof Error ? reason.message : String(reason);
+                return unavailableUsage({
+                    providerId: this.providerId,
+                    displayName: "Antigravity",
+                    error: \`Quota fetch failed: \${msg}\`,
+                });
+            }
+
+            const rawUsageOut = usageRes.value.stdout || usageRes.value.stderr || "";
             const rawCreditsOut = creditsRes.status === "fulfilled" ? creditsRes.value.stdout || creditsRes.value.stderr : "";
 
             const usageOut = (rawUsageOut || "").replace(/\\r\\n/g, "\\n");
@@ -334,7 +376,14 @@ export class AntigravityQuotaProvider {
                     scope = m[1].trim();
                     limitType = m[2].trim();
                     remainingPct = parseInt(m[3], 10);
-                    resetsAt = m[4] ? new Date(m[4].trim()).toISOString() : null;
+                    if (m[4]) {
+                        try {
+                            const d = new Date(m[4].trim());
+                            resetsAt = isNaN(d.getTime()) ? null : d.toISOString();
+                        } catch {
+                            resetsAt = null;
+                        }
+                    }
                 } else {
                     const parts = trimmed.split(/\\t+|\\s{2,}/).map(p => p.trim());
                     if (parts.length >= 3) {
@@ -342,7 +391,14 @@ export class AntigravityQuotaProvider {
                         limitType = parts[1];
                         const remMatch = parts[2].match(/(\\d+)%/);
                         if (remMatch) remainingPct = parseInt(remMatch[1], 10);
-                        resetsAt = parts[3] ? new Date(parts[3]).toISOString() : null;
+                        if (parts[3]) {
+                            try {
+                                const d = new Date(parts[3]);
+                                resetsAt = isNaN(d.getTime()) ? null : d.toISOString();
+                            } catch {
+                                resetsAt = null;
+                            }
+                        }
                     }
                 }
 

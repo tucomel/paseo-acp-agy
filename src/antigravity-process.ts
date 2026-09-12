@@ -56,6 +56,11 @@ export function resolveDefaultAgyBinary(force = false): string {
           path.join(localAppData, "Programs", "Antigravity", "agy.exe"),
           path.join(programFiles, "Antigravity", "bin", "agy.exe"),
           path.join(programFilesX86, "Antigravity", "bin", "agy.exe"),
+          path.join(localAppData, "Google", "Antigravity", "agy.exe"),
+          path.join(localAppData, "Google", "Antigravity", "bin", "agy.exe"),
+          path.join(home, ".antigravity", "bin", "agy.exe"),
+          path.join(home, ".antigravity", "agy.exe"),
+          path.join(home, ".gemini", "antigravity-cli", "bin", "agy.exe"),
           path.join(localAppData, "Microsoft", "WindowsApps", "agy.exe"),
           path.join(home, ".local", "bin", "agy.exe"),
           path.join(appData, "npm", "agy.exe"),
@@ -93,7 +98,11 @@ export function resolveDefaultAgyBinary(force = false): string {
             path.join(appData, "npm", "agy.cmd"),
             path.join(localAppData, "npm", "agy.cmd"),
             path.join(home, ".local", "bin", "agy.cmd"),
+            path.join(home, ".antigravity", "bin", "agy.cmd"),
+            path.join(home, ".gemini", "antigravity-cli", "bin", "agy.cmd"),
             path.join(appData, "npm", "agy.bat"),
+            path.join(localAppData, "npm", "agy.bat"),
+            path.join(home, ".local", "bin", "agy.bat"),
           ];
           for (const cand of batchCandidates) {
             if (fs.existsSync(cand)) {
@@ -402,7 +411,7 @@ export class AntigravityProcess extends EventEmitter {
     });
 
     const isWin = process.platform === "win32";
-    const isBatch = isWin && isWindowsBatchScript(this.binaryPath);
+    const isBatch = isWin && (isWindowsBatchScript(this.binaryPath) || this.binaryPath === "agy");
     const child = spawn(this.binaryPath, args, {
       cwd: this.cwd,
       env: this.env,

@@ -266,6 +266,17 @@ export class ACPServer {
             this.sendSuccess(id, await this.sessionState(session, true));
             this.publishCommands(session.id);
             this.publishUsageUpdate(session);
+            // Re-publish usage after ACPAgent completes awaiting newSession and stores this.sessionId
+            setTimeout(() => {
+              if (this.sessionManager.getSession(session.id)) {
+                this.publishUsageUpdate(session);
+              }
+            }, 150);
+            setTimeout(() => {
+              if (this.sessionManager.getSession(session.id)) {
+                this.publishUsageUpdate(session);
+              }
+            }, 500);
           }
           break;
         }
@@ -298,6 +309,12 @@ export class ACPServer {
               this.sendSuccess(id, await this.sessionState(session));
               this.publishCommands(session.id);
               this.publishUsageUpdate(session);
+              const activeSession = session;
+              setTimeout(() => {
+                if (this.sessionManager.getSession(activeSession.id)) {
+                  this.publishUsageUpdate(activeSession);
+                }
+              }, 150);
             }
           } catch (err) {
             if (!isNotification) {

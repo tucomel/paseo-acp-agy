@@ -163,7 +163,13 @@ if (args.includes("doctor") || args.includes("--doctor")) {
   const paseoRunning = isPaseoRunning();
   if (paseoRunning) {
     process.stdout.write("  [!] Paseo process is currently running.\n");
-    process.stdout.write("      Note: If you run setup/patch, please close Paseo completely (check system tray and Task Manager) to avoid EBUSY file locking.\n");
+    if (isWin) {
+      process.stdout.write("      Tip: To restart Paseo completely on Windows, run in PowerShell:\n");
+      process.stdout.write("        Stop-Process -Name \"Paseo\" -Force -ErrorAction SilentlyContinue\n");
+      process.stdout.write("      Then launch Paseo again.\n");
+    } else {
+      process.stdout.write("      Tip: Run 'paseo daemon restart' or close the Paseo app to reload.\n");
+    }
   } else {
     process.stdout.write("  [OK] Paseo is not currently running (safe to patch/update).\n");
   }
@@ -192,7 +198,7 @@ if (args.includes("doctor") || args.includes("--doctor")) {
     hasIssue = true;
     if (paseoRunning) {
       process.stdout.write(`  - Found ${unpatchedCount} unpatched Paseo target(s), but Paseo is currently running.\n`);
-      process.stdout.write("    Action: Close Paseo.exe completely, then run:\n");
+      process.stdout.write("    Action: Close Paseo completely (Stop-Process -Name \"Paseo\" -Force), then run:\n");
       process.stdout.write("      npx -y paseo-acp-agy setup\n");
     } else {
       process.stdout.write(`  - Found ${unpatchedCount} unpatched Paseo target(s).\n`);
@@ -244,11 +250,21 @@ if (
       if (allPatched.length > 0) {
         process.stdout.write(
           `Successfully integrated with: \n${allPatched.map((p) => `  - ${p}`).join("\n")}\n\n` +
-          `Antigravity quota provider and context-window telemetry are now enabled!\n` +
-          `Please restart Paseo (or run 'paseo daemon restart') to apply changes.\n`
+          `Antigravity quota provider and context-window telemetry are now enabled!\n`
         );
       } else {
         process.stdout.write("Paseo is already up-to-date and configured for Antigravity telemetry.\n");
+      }
+      if (isPaseoRunning()) {
+        process.stdout.write(
+          `\n⚠️  IMPORTANT: Paseo is currently running in the background!\n` +
+          `   Windows caches running executables in memory, so changes will only take effect after restarting Paseo.\n` +
+          `   In PowerShell, run:\n` +
+          `     Stop-Process -Name "Paseo" -Force -ErrorAction SilentlyContinue\n` +
+          `   Then launch Paseo again.\n\n`
+        );
+      } else {
+        process.stdout.write(`Please start Paseo to apply changes.\n\n`);
       }
       if (res.errors.length > 0) {
         process.stderr.write(`Notice: Some paths could not be modified (may require admin/close Paseo):\n${res.errors.map(e => `  - ${e}`).join("\n")}\n`);

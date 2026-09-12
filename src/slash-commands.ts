@@ -357,7 +357,7 @@ export function formatUsageOutput(rawText: string): string {
 }
 
 async function runAgySlash(binaryPath: string, cwd: string, slashCommand: string): Promise<string> {
-  const isBatch = process.platform === "win32" && isWindowsBatchScript(binaryPath);
+  const isBatch = process.platform === "win32" && (isWindowsBatchScript(binaryPath) || binaryPath === "agy");
   const cmd = isBatch && binaryPath.includes(" ") && !binaryPath.startsWith('"') ? `"${binaryPath}"` : binaryPath;
   const { stdout, stderr } = await execFileAsync(
     cmd,

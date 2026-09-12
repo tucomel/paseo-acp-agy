@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { logger } from "./logger.js";
 import { saveBase64Image } from "./attachments.js";
-import { isWindowsBatchScript } from "./antigravity-process.js";
+import { isWindowsBatchScript, resolveDefaultAgyBinary } from "./antigravity-process.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -487,7 +487,7 @@ export async function fetchAntigravityUsage(
     return cachedProviderUsage;
   }
 
-  const isBatch = process.platform === "win32" && isWindowsBatchScript(binaryPath);
+  const isBatch = process.platform === "win32" && (isWindowsBatchScript(binaryPath) || binaryPath === "agy");
   const cmd = isBatch && binaryPath.includes(" ") && !binaryPath.startsWith('"') ? `"${binaryPath}"` : binaryPath;
   try {
     const [usageResult, creditsResult] = await Promise.allSettled([
@@ -631,7 +631,7 @@ export async function fetchAvailableModels(binaryPath: string = "agy", force = f
     return inFlightModelFetch;
   }
   inFlightModelFetch = (async () => {
-    const isBatch = process.platform === "win32" && isWindowsBatchScript(binaryPath);
+    const isBatch = process.platform === "win32" && (isWindowsBatchScript(binaryPath) || binaryPath === "agy");
     const cmd = isBatch && binaryPath.includes(" ") && !binaryPath.startsWith('"') ? `"${binaryPath}"` : binaryPath;
     try {
       const { stdout } = await execFileAsync(cmd, ["models"], {
