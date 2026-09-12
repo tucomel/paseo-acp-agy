@@ -16,7 +16,7 @@ function getPackageVersion(): string {
   } catch {
     // ignore
   }
-  return "1.2.1";
+  return "1.2.2";
 }
 
 export const SEMVER_VERSION = getPackageVersion();

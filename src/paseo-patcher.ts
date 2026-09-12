@@ -220,13 +220,23 @@ function resolveAgyBinary() {
 
             // Prioritize .exe candidates over .cmd / .bat
             const exeCandidates = [
+                path.join(localAppData, "agy", "bin", "agy.exe"),
+                path.join(localAppData, "agy", "agy.exe"),
+                path.join(home, ".agy", "bin", "agy.exe"),
+                path.join(home, ".agy", "agy.exe"),
                 path.join(localAppData, "Programs", "Antigravity", "bin", "agy.exe"),
                 path.join(localAppData, "Programs", "antigravity", "agy.exe"),
                 path.join(localAppData, "Programs", "Antigravity", "agy.exe"),
+                path.join(localAppData, "Programs", "agy", "bin", "agy.exe"),
+                path.join(localAppData, "Programs", "agy", "agy.exe"),
                 path.join(programFiles, "Antigravity", "bin", "agy.exe"),
+                path.join(programFiles, "agy", "bin", "agy.exe"),
                 path.join(programFilesX86, "Antigravity", "bin", "agy.exe"),
+                path.join(programFilesX86, "agy", "bin", "agy.exe"),
                 path.join(localAppData, "Google", "Antigravity", "agy.exe"),
                 path.join(localAppData, "Google", "Antigravity", "bin", "agy.exe"),
+                path.join(localAppData, "Google", "agy", "bin", "agy.exe"),
+                path.join(localAppData, "Google", "agy", "agy.exe"),
                 path.join(home, ".antigravity", "bin", "agy.exe"),
                 path.join(home, ".antigravity", "agy.exe"),
                 path.join(home, ".gemini", "antigravity-cli", "bin", "agy.exe"),
@@ -260,11 +270,16 @@ function resolveAgyBinary() {
             // Fallback to batch scripts (.cmd / .bat) if no .exe found
             if (resolved === "agy") {
                 const batchCandidates = [
+                    path.join(localAppData, "agy", "bin", "agy.cmd"),
+                    path.join(localAppData, "agy", "agy.cmd"),
+                    path.join(home, ".agy", "bin", "agy.cmd"),
                     path.join(appData, "npm", "agy.cmd"),
                     path.join(localAppData, "npm", "agy.cmd"),
                     path.join(home, ".local", "bin", "agy.cmd"),
                     path.join(home, ".antigravity", "bin", "agy.cmd"),
                     path.join(home, ".gemini", "antigravity-cli", "bin", "agy.cmd"),
+                    path.join(localAppData, "agy", "bin", "agy.bat"),
+                    path.join(localAppData, "agy", "agy.bat"),
                     path.join(appData, "npm", "agy.bat"),
                     path.join(localAppData, "npm", "agy.bat"),
                     path.join(home, ".local", "bin", "agy.bat"),
@@ -322,14 +337,26 @@ export class AntigravityQuotaProvider {
             const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\\\Program Files (x86)";
 
             const extraPaths = isWin ? [
-                path.join(appData, "npm"),
-                path.join(localAppData, "npm"),
-                path.join(programFiles, "nodejs"),
-                path.join(programFilesX86, "nodejs"),
+                path.join(localAppData, "agy", "bin"),
+                path.join(localAppData, "agy"),
+                path.join(home, ".agy", "bin"),
                 path.join(localAppData, "Programs", "Antigravity", "bin"),
                 path.join(localAppData, "Programs", "antigravity"),
+                path.join(localAppData, "Programs", "agy", "bin"),
+                path.join(localAppData, "Google", "Antigravity", "bin"),
+                path.join(localAppData, "Google", "agy", "bin"),
                 path.join(home, ".antigravity", "bin"),
+                path.join(home, ".gemini", "antigravity-cli", "bin"),
                 path.join(home, ".local", "bin"),
+                path.join(appData, "npm"),
+                path.join(localAppData, "npm"),
+                path.join(localAppData, "Microsoft", "WindowsApps"),
+                path.join(programFiles, "nodejs"),
+                path.join(programFilesX86, "nodejs"),
+                path.join(programFiles, "Antigravity", "bin"),
+                path.join(programFiles, "agy", "bin"),
+                path.join(programFilesX86, "Antigravity", "bin"),
+                path.join(programFilesX86, "agy", "bin"),
             ].filter(p => fs.existsSync(p)) : [];
 
             const env = { ...process.env };
@@ -968,7 +995,7 @@ export async function isPaseoAsarPatched(asarPath: string): Promise<boolean> {
   try {
     if (!fs.existsSync(asarPath)) return false;
     const files = listPackage(asarPath);
-    return files.some((f) => f.includes("antigravity.js"));
+    return files.some((f) => f.replace(/\\/g, "/").includes("quota-fetcher/providers/antigravity.js"));
   } catch {
     return false;
   }

@@ -224,6 +224,27 @@ export const PROVIDER_USAGE_FETCHERS = [
     expect(await isPaseoAsarPatched(asarPath)).toBe(false);
   });
 
+  it("should NOT return true for unpatched asar containing native features/editor-targets/targets/antigravity.js", async () => {
+    const asarSrcDir = path.join(tempDir, "mock-native-antigravity-target");
+    const targetDir = path.join(asarSrcDir, "features", "editor-targets", "targets");
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.writeFileSync(path.join(targetDir, "antigravity.js"), "// native paseo editor target");
+    const asarPath = path.join(tempDir, "native-target.asar");
+    await createPackage(asarSrcDir, asarPath);
+
+    // Must NOT be considered patched because it lacks the quota provider
+    expect(await isPaseoAsarPatched(asarPath)).toBe(false);
+
+    // Now add the actual quota provider and verify it reports true
+    const quotaDir = path.join(asarSrcDir, "node_modules", "@getpaseo", "server", "dist", "server", "services", "quota-fetcher", "providers");
+    fs.mkdirSync(quotaDir, { recursive: true });
+    fs.writeFileSync(path.join(quotaDir, "antigravity.js"), "// quota provider");
+    const patchedAsarPath = path.join(tempDir, "actually-patched.asar");
+    await createPackage(asarSrcDir, patchedAsarPath);
+
+    expect(await isPaseoAsarPatched(patchedAsarPath)).toBe(true);
+  });
+
   it("should execute isPaseoRunning safely without throwing", () => {
     const running = isPaseoRunning();
     expect(typeof running).toBe("boolean");
