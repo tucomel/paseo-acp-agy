@@ -135,6 +135,8 @@ export function findPaseoServerInstallations(): string[] {
 
     if (home) {
       posixLocations.push(
+        path.join(home, ".local", "lib", "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server"),
+        path.join(home, ".local", "lib", "node_modules", "@getpaseo", "server"),
         path.join(home, ".local", "share", "pnpm", "global", "5", "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server"),
         path.join(home, ".bun", "install", "global", "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server")
       );
@@ -157,6 +159,36 @@ export function findPaseoServerInstallations(): string[] {
     for (const loc of posixLocations) {
       if (fs.existsSync(loc)) candidates.add(path.resolve(loc));
     }
+
+    // Inspect which paseo on POSIX
+    try {
+      const whichOut = execFileSync("which", ["paseo"], {
+        encoding: "utf-8",
+        timeout: 3000,
+      }).trim();
+      for (const line of whichOut.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
+        let realLine = line;
+        try {
+          realLine = fs.realpathSync(line);
+        } catch {}
+        const dirs = [path.dirname(line), path.dirname(realLine)];
+        for (const dir of dirs) {
+          const checks = [
+            path.join(dir, "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server"),
+            path.join(dir, "node_modules", "@getpaseo", "server"),
+            path.join(path.dirname(dir), "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server"),
+            path.join(path.dirname(dir), "node_modules", "@getpaseo", "server"),
+            path.join(path.dirname(path.dirname(dir)), "node_modules", "@getpaseo", "cli", "node_modules", "@getpaseo", "server"),
+            path.join(path.dirname(path.dirname(dir)), "node_modules", "@getpaseo", "server"),
+            path.join(dir, "resources", "app.asar.unpacked", "node_modules", "@getpaseo", "server"),
+            path.join(path.dirname(dir), "resources", "app.asar.unpacked", "node_modules", "@getpaseo", "server"),
+          ];
+          for (const c of checks) {
+            if (fs.existsSync(c)) candidates.add(path.resolve(c));
+          }
+        }
+      }
+    } catch {}
 
     try {
       const npmRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf-8", timeout: 2000 }).trim();
@@ -635,37 +667,41 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
       }
 
       // Patch handleUsageUpdate
-      if (acpCode.includes("handleUsageUpdate") && (!acpCode.includes("this.deliverTranslatedEvents") || acpCode.includes("this.notifySubscribers"))) {
-        const startIdx = acpCode.search(/\bhandleUsageUpdate\s*\(/);
-        if (startIdx !== -1) {
-          const openBrace = acpCode.indexOf("{", startIdx);
-          if (openBrace !== -1) {
-            let depth = 1;
-            let i = openBrace + 1;
-            while (i < acpCode.length && depth > 0) {
-              if (acpCode[i] === "{") depth++;
-              else if (acpCode[i] === "}") depth--;
-              i++;
-            }
-            if (depth === 0) {
-              const newHandler = `handleUsageUpdate(update) {
-        if (!update) return;
-        const usage = mapACPUsage(update);
-        if (usage) {
-            this.currentTurnUsage = { ...this.currentTurnUsage, ...usage };
-            const event = {
-                type: "usage_updated",
-                provider: this.provider,
-                usage: this.currentTurnUsage,
-                ...(this.activeForegroundTurnId ? { turnId: this.activeForegroundTurnId } : {}),
-            };
-            if (typeof this.deliverTranslatedEvents === "function") {
-                this.deliverTranslatedEvents([event]);
-            } else if (typeof this.pushEvent === "function") {
-                this.pushEvent(event);
-            }
-        }
-    }`;
+      const methodMatch = acpCode.match(/(?:^|\n)([ \t]*)handleUsageUpdate\s*\([^)]*\)\s*\{/);
+      if (methodMatch && methodMatch.index !== undefined) {
+        const startIdx = methodMatch.index + (methodMatch[0].startsWith("\n") ? 1 : 0);
+        const openBrace = acpCode.indexOf("{", startIdx);
+        if (openBrace !== -1) {
+          let depth = 1;
+          let i = openBrace + 1;
+          while (i < acpCode.length && depth > 0) {
+            if (acpCode[i] === "{") depth++;
+            else if (acpCode[i] === "}") depth--;
+            i++;
+          }
+          if (depth === 0) {
+            const currentMethodBody = acpCode.slice(startIdx, i);
+            const needsPatch = !currentMethodBody.includes('type: "usage_updated"') || currentMethodBody.includes("this.notifySubscribers");
+            if (needsPatch) {
+              const indent = methodMatch[1] || "    ";
+              const newHandler = `${indent}handleUsageUpdate(update) {
+${indent}    if (!update) return;
+${indent}    const usage = mapACPUsage(update);
+${indent}    if (usage) {
+${indent}        this.currentTurnUsage = { ...this.currentTurnUsage, ...usage };
+${indent}        const event = {
+${indent}            type: "usage_updated",
+${indent}            provider: this.provider,
+${indent}            usage: this.currentTurnUsage,
+${indent}            ...(this.activeForegroundTurnId ? { turnId: this.activeForegroundTurnId } : {}),
+${indent}        };
+${indent}        if (typeof this.pushEvent === "function") {
+${indent}            this.pushEvent(event);
+${indent}        } else if (typeof this.deliverTranslatedEvents === "function") {
+${indent}            this.deliverTranslatedEvents([event]);
+${indent}        }
+${indent}    }
+${indent}}`;
               acpCode = acpCode.slice(0, startIdx) + newHandler + acpCode.slice(i);
               acpModified = true;
             }
@@ -945,6 +981,7 @@ export function isPaseoServerPatched(serverDir: string): boolean {
   try {
     if (!fs.existsSync(serverDir)) return false;
 
+    // 1. Antigravity quota provider file
     const antigravityJsCandidates = [
       path.join(serverDir, "dist", "server", "services", "quota-fetcher", "providers", "antigravity.js"),
       path.join(serverDir, "dist", "services", "quota-fetcher", "providers", "antigravity.js"),
@@ -969,20 +1006,74 @@ export function isPaseoServerPatched(serverDir: string): boolean {
       hasProvider = checkRecursive(path.join(serverDir, "dist"));
     }
 
-    if (hasProvider) return true;
+    if (!hasProvider) return false;
 
+    // 2. Manifest check
     const manifestCandidates = [
       path.join(serverDir, "dist", "server", "services", "quota-fetcher", "manifest.js"),
       path.join(serverDir, "dist", "services", "quota-fetcher", "manifest.js"),
     ];
-    for (const cand of manifestCandidates) {
-      if (fs.existsSync(cand)) {
-        const content = fs.readFileSync(cand, "utf-8");
-        if (content.includes('providerId: "antigravity"')) return true;
+    let manifestFile = manifestCandidates.find((f) => fs.existsSync(f));
+    if (!manifestFile && fs.existsSync(path.join(serverDir, "dist"))) {
+      const findManifest = (dir: string, depth = 0): string | null => {
+        if (depth > 5) return null;
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isDirectory() && e.name !== "node_modules") {
+              const found = findManifest(full, depth + 1);
+              if (found) return found;
+            } else if (e.isFile() && e.name === "manifest.js" && dir.replace(/\\/g, "/").includes("quota-fetcher")) {
+              return full;
+            }
+          }
+        } catch {}
+        return null;
+      };
+      manifestFile = findManifest(path.join(serverDir, "dist")) || undefined;
+    }
+    if (manifestFile) {
+      const content = fs.readFileSync(manifestFile, "utf-8");
+      if (!content.includes('providerId: "antigravity"')) {
+        return false;
       }
     }
 
-    return false;
+    // 3. ACP Agent check (context window telemetry & usage updates)
+    const acpCandidates = [
+      path.join(serverDir, "dist", "server", "server", "agent", "providers", "acp-agent.js"),
+      path.join(serverDir, "dist", "server", "agent", "providers", "acp-agent.js"),
+      path.join(serverDir, "dist", "agent", "providers", "acp-agent.js"),
+    ];
+    let acpFile = acpCandidates.find((f) => fs.existsSync(f));
+    if (!acpFile && fs.existsSync(path.join(serverDir, "dist"))) {
+      const findAcp = (dir: string, depth = 0): string | null => {
+        if (depth > 5) return null;
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isDirectory() && e.name !== "node_modules") {
+              const found = findAcp(full, depth + 1);
+              if (found) return found;
+            } else if (e.isFile() && e.name === "acp-agent.js") {
+              return full;
+            }
+          }
+        } catch {}
+        return null;
+      };
+      acpFile = findAcp(path.join(serverDir, "dist")) || undefined;
+    }
+    if (acpFile) {
+      const content = fs.readFileSync(acpFile, "utf-8");
+      if (!content.includes('type: "usage_updated"') || !content.includes("contextWindowMaxTokens")) {
+        return false;
+      }
+    }
+
+    return true;
   } catch {
     return false;
   }

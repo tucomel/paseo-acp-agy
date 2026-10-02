@@ -214,6 +214,63 @@ export const PROVIDER_USAGE_FETCHERS = [
     expect(isPaseoServerPatched(tempDir)).toBe(true);
   });
 
+  it("should patch handleUsageUpdate in Paseo 0.10.3 where deliverTranslatedEvents is pre-existing", () => {
+    const quotaDir = path.join(tempDir, "dist", "server", "services", "quota-fetcher");
+    fs.mkdirSync(quotaDir, { recursive: true });
+    const manifestPath = path.join(quotaDir, "manifest.js");
+    fs.writeFileSync(
+      manifestPath,
+      `export const PROVIDER_USAGE_FETCHERS = [];`,
+      "utf-8"
+    );
+
+    const agentDir = path.join(tempDir, "dist", "server", "server", "agent", "providers");
+    fs.mkdirSync(agentDir, { recursive: true });
+    const acpAgentPath = path.join(agentDir, "acp-agent.js");
+    fs.writeFileSync(
+      acpAgentPath,
+      `export function mapACPUsage(usage) {
+    if (!usage) return undefined;
+    return { inputTokens: usage.inputTokens };
+}
+
+class ACPAgentSession {
+    deliverTranslatedEvents(events) {
+        for (const event of events) {
+            this.pushEvent(event);
+        }
+    }
+    handleUsageUpdate(update) {
+        void update;
+    }
+}
+`,
+      "utf-8"
+    );
+
+    // Before patching: isPaseoServerPatched must be false
+    expect(isPaseoServerPatched(tempDir)).toBe(false);
+
+    // Apply patch
+    const patchResult = patchPaseoServer(tempDir);
+    expect(patchResult.success).toBe(true);
+    expect(patchResult.changes.some((c) => c.includes("acp-agent.js"))).toBe(true);
+
+    // Verify acp-agent.js was modified
+    const patchedCode = fs.readFileSync(acpAgentPath, "utf-8");
+    expect(patchedCode).toContain('type: "usage_updated"');
+    expect(patchedCode).toContain("this.currentTurnUsage = { ...this.currentTurnUsage, ...usage };");
+    expect(patchedCode).toContain("contextWindowMaxTokens: usage.contextWindowMaxTokens ?? usage.size ?? undefined");
+
+    // After patching: isPaseoServerPatched must be true
+    expect(isPaseoServerPatched(tempDir)).toBe(true);
+
+    // Subsequent run must be idempotent
+    const secondResult = patchPaseoServer(tempDir);
+    expect(secondResult.success).toBe(true);
+    expect(secondResult.changes.some((c) => c.includes("acp-agent.js"))).toBe(false);
+  });
+
   it("should accurately report isPaseoAsarPatched status", async () => {
     const asarSrcDir = path.join(tempDir, "mock-app-unpatched");
     fs.mkdirSync(asarSrcDir, { recursive: true });
