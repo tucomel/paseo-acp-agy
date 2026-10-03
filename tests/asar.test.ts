@@ -75,4 +75,34 @@ describe("ASAR pure TypeScript implementation", () => {
       'console.log("deep");'
     );
   });
+
+  it("should preserve unpacked paths without packing external binaries into asar payload", async () => {
+    const srcDir = path.join(tempDir, "unpacked-test");
+    fs.mkdirSync(path.join(srcDir, "bin"), { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "index.js"), 'console.log("hello");');
+
+    const asarFile = path.join(tempDir, "initial.asar");
+    await createPackage(srcDir, asarFile, {
+      unpackedPaths: ["bin/external.bin"],
+      originalHeader: {
+        files: {
+          bin: {
+            files: {
+              "external.bin": { size: 20, unpacked: true },
+            },
+          },
+        },
+      },
+    });
+
+    const fileList = listPackage(asarFile);
+    expect(fileList).toContain("/index.js");
+    expect(fileList).toContain("/bin/external.bin");
+
+    const extractDir = path.join(tempDir, "extracted-unpacked");
+    const { unpackedPaths } = extractAll(asarFile, extractDir);
+    expect(unpackedPaths).toContain("bin/external.bin");
+    // Ensure external.bin was NOT copied into extractDir payload
+    expect(fs.existsSync(path.join(extractDir, "bin", "external.bin"))).toBe(false);
+  });
 });

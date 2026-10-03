@@ -819,7 +819,7 @@ export async function patchPaseoAsar(
     }
 
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paseo-asar-extract-"));
-    extractAll(asarPath, tempDir);
+    const { unpackedPaths, originalHeader } = extractAll(asarPath, tempDir);
 
     // Look for server directory in extracted files
     const serverCandidates = [
@@ -868,8 +868,26 @@ export async function patchPaseoAsar(
 
     changes.push(...patchResult.changes);
 
-    // Create backup if not already present
-    const backupPath = `${asarPath}.bak`;
+    // Create backup if not already present.
+    // On macOS, never write backup inside .app bundle (e.g. app.asar.bak) because it breaks code signing seals.
+    let backupPath: string;
+    if (process.platform === "darwin" && asarPath.includes(".app")) {
+      const backupDir = path.join(os.homedir(), ".paseo", "backups");
+      if (!fs.existsSync(backupDir)) {
+        fs.mkdirSync(backupDir, { recursive: true });
+      }
+      backupPath = path.join(backupDir, "app.asar.bak");
+      // Clean up any orphan backup inside the .app bundle from previous runs
+      const orphanBak = `${asarPath}.bak`;
+      if (fs.existsSync(orphanBak)) {
+        try {
+          fs.unlinkSync(orphanBak);
+        } catch {}
+      }
+    } else {
+      backupPath = `${asarPath}.bak`;
+    }
+
     if (!fs.existsSync(backupPath)) {
       try {
         fs.copyFileSync(asarPath, backupPath);
@@ -880,7 +898,7 @@ export async function patchPaseoAsar(
     }
 
     tempAsar = path.join(os.tmpdir(), `app-${Date.now()}.asar`);
-    await createPackage(tempDir, tempAsar);
+    await createPackage(tempDir, tempAsar, { unpackedPaths, originalHeader });
 
     // Replace original archive with locked file handling for Windows
     try {
@@ -900,6 +918,21 @@ export async function patchPaseoAsar(
         }
       } else {
         throw copyErr;
+      }
+    }
+
+    // On macOS, re-sign application bundle if inside an .app directory to satisfy Gatekeeper
+    if (process.platform === "darwin" && asarPath.includes(".app")) {
+      const appIndex = asarPath.indexOf(".app");
+      const appBundlePath = asarPath.slice(0, appIndex + 4);
+      try {
+        execFileSync("codesign", ["--force", "--deep", "--sign", "-", appBundlePath], {
+          stdio: "ignore",
+          timeout: 15000,
+        });
+        changes.push(`Re-signed macOS bundle at ${appBundlePath}`);
+      } catch (signErr) {
+        logger.warn(`Could not re-sign ${appBundlePath}`, { error: String(signErr) });
       }
     }
 

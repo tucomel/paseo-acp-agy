@@ -7,6 +7,12 @@ export interface AsarNode {
   offset?: string;
   executable?: boolean;
   unpacked?: boolean;
+  link?: string;
+}
+
+export interface ExtractResult {
+  unpackedPaths: string[];
+  originalHeader: AsarNode;
 }
 
 /**
@@ -76,9 +82,11 @@ export function listPackage(archivePath: string): string[] {
  * Pure TypeScript, zero-dependency ASAR archive extractor.
  * Compatible with all Node.js versions (Node 18, 20, 22, 24+) across Windows, macOS, and Linux.
  */
-export function extractAll(archivePath: string, destDir: string): void {
+export function extractAll(archivePath: string, destDir: string): ExtractResult {
   const { header, dataBaseOffset } = readArchiveHeader(archivePath);
   const fd = fs.openSync(archivePath, "r");
+  const unpackedPaths: string[] = [];
+
   try {
     function extractNode(node: AsarNode, currentPath: string, relParts: string[] = []) {
       if (node.files) {
@@ -86,6 +94,17 @@ export function extractAll(archivePath: string, destDir: string): void {
         for (const [name, child] of Object.entries(node.files)) {
           extractNode(child, path.join(currentPath, name), [...relParts, name]);
         }
+      } else if (node.link) {
+        fs.mkdirSync(path.dirname(currentPath), { recursive: true });
+        try {
+          fs.unlinkSync(currentPath);
+        } catch {}
+        fs.symlinkSync(node.link, currentPath);
+      } else if (node.unpacked) {
+        // Unpacked files belong in archive.unpacked and must NOT be copied into destDir,
+        // so that re-packing does not duplicate external binaries into the asar payload.
+        const relPath = relParts.join("/");
+        unpackedPaths.push(relPath);
       } else if (node.size !== undefined && node.offset !== undefined) {
         const fileOffset = dataBaseOffset + parseInt(node.offset, 10);
         const fileBuf = Buffer.alloc(node.size);
@@ -96,27 +115,38 @@ export function extractAll(archivePath: string, destDir: string): void {
         fs.writeFileSync(currentPath, fileBuf, {
           mode: node.executable ? 0o755 : 0o644,
         });
-      } else if (node.unpacked) {
-        const unpackedSrc = path.join(archivePath + ".unpacked", ...relParts);
-        if (fs.existsSync(unpackedSrc)) {
-          fs.mkdirSync(path.dirname(currentPath), { recursive: true });
-          fs.copyFileSync(unpackedSrc, currentPath);
-        }
       }
     }
 
     extractNode(header, destDir);
+    return { unpackedPaths, originalHeader: header };
   } finally {
     fs.closeSync(fd);
   }
+}
+
+export interface CreatePackageOptions {
+  unpackedPaths?: string[];
+  originalHeader?: AsarNode;
 }
 
 /**
  * Pure TypeScript, zero-dependency ASAR archive builder.
  * Compatible with all Node.js versions (Node 18, 20, 22, 24+) across Windows, macOS, and Linux.
  */
-export async function createPackage(srcDir: string, destFile: string): Promise<void> {
-  const files: { relPath: string; fullPath: string; size: number; executable?: boolean }[] = [];
+export async function createPackage(
+  srcDir: string,
+  destFile: string,
+  options?: CreatePackageOptions
+): Promise<void> {
+  const files: {
+    relPath: string;
+    fullPath: string;
+    size: number;
+    executable?: boolean;
+    isLink?: boolean;
+    linkTarget?: string;
+  }[] = [];
 
   function walk(dir: string, rel = "") {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -124,15 +154,23 @@ export async function createPackage(srcDir: string, destFile: string): Promise<v
     for (const e of entries) {
       const entryRel = rel ? `${rel}/${e.name}` : e.name;
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) {
-        walk(full, entryRel);
-      } else if (e.isFile()) {
-        const stat = fs.statSync(full);
-        const executable = Boolean(stat.mode & 0o111);
+      const lstat = fs.lstatSync(full);
+      if (lstat.isSymbolicLink()) {
         files.push({
           relPath: entryRel,
           fullPath: full,
-          size: stat.size,
+          size: 0,
+          isLink: true,
+          linkTarget: fs.readlinkSync(full),
+        });
+      } else if (lstat.isDirectory()) {
+        walk(full, entryRel);
+      } else if (lstat.isFile()) {
+        const executable = Boolean(lstat.mode & 0o111);
+        files.push({
+          relPath: entryRel,
+          fullPath: full,
+          size: lstat.size,
           executable: executable || undefined,
         });
       }
@@ -154,12 +192,40 @@ export async function createPackage(srcDir: string, destFile: string): Promise<v
       curr = curr[parts[i]].files!;
     }
     const leaf = parts[parts.length - 1];
-    curr[leaf] = {
-      size: f.size,
-      offset: String(currentOffset),
-      executable: f.executable,
-    };
-    currentOffset += f.size;
+    if (f.isLink) {
+      curr[leaf] = { link: f.linkTarget };
+    } else {
+      curr[leaf] = {
+        size: f.size,
+        offset: String(currentOffset),
+        executable: f.executable,
+      };
+      currentOffset += f.size;
+    }
+  }
+
+  // Restore unpacked file references from original archive if provided
+  if (options?.unpackedPaths && options?.originalHeader) {
+    for (const relPath of options.unpackedPaths) {
+      const parts = relPath.split("/");
+      let origNode: AsarNode | undefined = options.originalHeader;
+      for (const p of parts) {
+        origNode = origNode?.files?.[p];
+      }
+
+      let curr = header.files!;
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (!curr[parts[i]]) {
+          curr[parts[i]] = { files: {} };
+        }
+        curr = curr[parts[i]].files!;
+      }
+      const leaf = parts[parts.length - 1];
+      curr[leaf] = {
+        size: origNode?.size ?? 0,
+        unpacked: true,
+      };
+    }
   }
 
   const jsonBuf = Buffer.from(JSON.stringify(header), "utf8");
@@ -184,7 +250,7 @@ export async function createPackage(srcDir: string, destFile: string): Promise<v
     fs.writeSync(fd, headerPickle);
 
     for (const f of files) {
-      if (f.size > 0) {
+      if (!f.isLink && f.size > 0) {
         const content = fs.readFileSync(f.fullPath);
         fs.writeSync(fd, content);
       }
