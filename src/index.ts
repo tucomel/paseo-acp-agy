@@ -256,12 +256,16 @@ if (
         process.stdout.write("Paseo is already up-to-date and configured for Antigravity telemetry.\n");
       }
       if (isPaseoRunning()) {
+        const isWin = process.platform === "win32";
         process.stdout.write(
           `\n⚠️  IMPORTANT: Paseo is currently running in the background!\n` +
-          `   Windows caches running executables in memory, so changes will only take effect after restarting Paseo.\n` +
-          `   In PowerShell, run:\n` +
-          `     Stop-Process -Name "Paseo" -Force -ErrorAction SilentlyContinue\n` +
-          `   Then launch Paseo again.\n\n`
+          (isWin
+            ? `   Windows caches running executables in memory, so changes will only take effect after restarting Paseo.\n` +
+              `   In PowerShell, run:\n` +
+              `     Stop-Process -Name "Paseo" -Force -ErrorAction SilentlyContinue\n` +
+              `   Then launch Paseo again.\n\n`
+            : `   Changes will only take effect after restarting the Paseo daemon/app.\n` +
+              `   Run 'paseo restart' or close the Paseo app to reload.\n\n`)
         );
       } else {
         process.stdout.write(`Please start Paseo to apply changes.\n\n`);
