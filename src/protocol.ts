@@ -492,14 +492,14 @@ export async function fetchAntigravityUsage(
   try {
     const [usageResult, creditsResult] = await Promise.allSettled([
       execFileAsync(cmd, ["--print", "/usage"], {
-        timeout: 8_000,
+        timeout: 30_000,
         maxBuffer: 1024 * 1024,
         env: process.env,
         shell: isBatch,
         windowsHide: true,
       }),
       execFileAsync(cmd, ["--print", "/credits"], {
-        timeout: 8_000,
+        timeout: 6_000,
         maxBuffer: 1024 * 1024,
         env: process.env,
         shell: isBatch,
@@ -516,6 +516,10 @@ export async function fetchAntigravityUsage(
     // /usage is the primary provider-availability probe. allSettled never
     // throws for an exec failure, so rejected results must be handled here.
     if (usageResult.status === "rejected") {
+      if (cachedProviderUsage && cachedProviderUsage.status === "available" && cachedProviderUsageBinaryPath === binaryPath) {
+        logger.warn("Transient failure in /usage; returning cached provider usage", { error: errorMessage(usageResult.reason) });
+        return cachedProviderUsage;
+      }
       const error = `Unable to fetch Antigravity quota: ${errorMessage(usageResult.reason)}`;
       logger.warn("Failed to fetch Antigravity provider usage", { error });
       return cacheProviderUsage(binaryPath, {

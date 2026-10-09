@@ -233,6 +233,9 @@ const execFileAsync = promisify(execFile);
 let cachedAgyBin = null;
 let cachedAgyBinTime = 0;
 const BIN_CACHE_TTL_MS = 86400000; // 24 hours
+let lastSuccessfulQuota = null;
+let lastSuccessfulQuotaTime = 0;
+const QUOTA_CACHE_TTL_MS = 60000; // 60 seconds
 
 function resolveAgyBinary() {
     if (process.env.AGY_BIN_PATH) return process.env.AGY_BIN_PATH;
@@ -357,6 +360,11 @@ export class AntigravityQuotaProvider {
     }
 
     async fetchUsage() {
+        const now = Date.now();
+        if (lastSuccessfulQuota && (now - lastSuccessfulQuotaTime < QUOTA_CACHE_TTL_MS)) {
+            return lastSuccessfulQuota;
+        }
+
         try {
             const isWin = process.platform === "win32";
             const bin = resolveAgyBinary();
@@ -399,14 +407,23 @@ export class AntigravityQuotaProvider {
                 env.Path = newPath;
             }
 
-            const [usageRes, creditsRes] = await Promise.allSettled([
-                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/usage"], { timeout: 15000, env, shell: isBatch, windowsHide: true }),
-                execFileAsync(bin, ["--print-timeout", "24h", "--print", "/credits"], { timeout: 15000, env, shell: isBatch, windowsHide: true }),
-            ]);
-
-            if (usageRes.status === "rejected") {
-                const reason = usageRes.reason;
-                const msg = reason instanceof Error ? reason.message : String(reason);
+            let rawUsageOut = "";
+            try {
+                const usageRes = await execFileAsync(bin, ["--print-timeout", "24h", "--print", "/usage"], {
+                    timeout: 30000,
+                    env,
+                    shell: isBatch,
+                    windowsHide: true,
+                });
+                rawUsageOut = usageRes.stdout || usageRes.stderr || "";
+            } catch (usageErr) {
+                if (lastSuccessfulQuota) {
+                    if (this.logger && typeof this.logger.warn === "function") {
+                        this.logger.warn("Transient failure fetching agy /usage; returning cached quota", { error: usageErr.message });
+                    }
+                    return lastSuccessfulQuota;
+                }
+                const msg = usageErr instanceof Error ? usageErr.message : String(usageErr);
                 return unavailableUsage({
                     providerId: this.providerId,
                     displayName: "Antigravity",
@@ -414,8 +431,16 @@ export class AntigravityQuotaProvider {
                 });
             }
 
-            const rawUsageOut = usageRes.value.stdout || usageRes.value.stderr || "";
-            const rawCreditsOut = creditsRes.status === "fulfilled" ? creditsRes.value.stdout || creditsRes.value.stderr : "";
+            let rawCreditsOut = "";
+            try {
+                const creditsRes = await execFileAsync(bin, ["--print-timeout", "24h", "--print", "/credits"], {
+                    timeout: 6000,
+                    env,
+                    shell: isBatch,
+                    windowsHide: true,
+                });
+                rawCreditsOut = creditsRes.stdout || creditsRes.stderr || "";
+            } catch {}
 
             const usageOut = (rawUsageOut || "").replace(/\\r\\n/g, "\\n");
             const creditsOut = (rawCreditsOut || "").replace(/\\r\\n/g, "\\n");
@@ -507,7 +532,7 @@ export class AntigravityQuotaProvider {
                 tone: remainingCredits > 0 ? "ok" : "default",
             });
 
-            return {
+            const result = {
                 providerId: this.providerId,
                 displayName: "Antigravity",
                 status: "available",
@@ -517,7 +542,12 @@ export class AntigravityQuotaProvider {
                 details: [],
                 error: null,
             };
+
+            lastSuccessfulQuota = result;
+            lastSuccessfulQuotaTime = Date.now();
+            return result;
         } catch (err) {
+            if (lastSuccessfulQuota) return lastSuccessfulQuota;
             return unavailableUsage({
                 providerId: this.providerId,
                 displayName: "Antigravity",
@@ -530,15 +560,397 @@ export class AntigravityQuotaProvider {
 }
 
 /**
+ * Generates the TypeScript source for the Paseo 0.11+ Plugin Usage Source.
+ * This integrates Antigravity quota and balance metrics into Paseo 0.11+'s
+ * new Plugin UsageSource architecture (Settings -> Usage).
+ */
+export function generateAntigravityPluginUsageTs(): string {
+  return `import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { z } from "zod";
+
+let cachedAgyBin = null;
+let lastAgyBinCheck = 0;
+const RESOLVE_TTL_MS = 30000;
+let lastSuccessfulPluginQuota = null;
+let lastSuccessfulPluginQuotaTime = 0;
+const PLUGIN_QUOTA_CACHE_TTL_MS = 60000;
+
+function resolveAgyBinary() {
+    const now = Date.now();
+    if (cachedAgyBin && (now - lastAgyBinCheck) < RESOLVE_TTL_MS) {
+        return cachedAgyBin;
+    }
+
+    if (process.env.AGY_BIN_PATH && fs.existsSync(process.env.AGY_BIN_PATH)) {
+        cachedAgyBin = process.env.AGY_BIN_PATH;
+        lastAgyBinCheck = now;
+        return cachedAgyBin;
+    }
+
+    const home = os.homedir();
+    const isWin = process.platform === "win32";
+
+    if (isWin) {
+        const localAppData = process.env.LOCALAPPDATA || (home ? path.join(home, "AppData", "Local") : "");
+        const programFiles = process.env.ProgramFiles || "C:\\\\Program Files";
+        const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\\\Program Files (x86)";
+
+        const winCandidates = [
+            path.join(localAppData, "Programs", "Antigravity", "bin", "agy.exe"),
+            path.join(localAppData, "Programs", "antigravity", "bin", "agy.exe"),
+            path.join(localAppData, "Programs", "Antigravity", "agy.exe"),
+            path.join(localAppData, "Programs", "antigravity", "agy.exe"),
+            path.join(localAppData, "antigravity", "agy.exe"),
+            path.join(programFiles, "Antigravity", "bin", "agy.exe"),
+            path.join(programFiles, "antigravity", "bin", "agy.exe"),
+            path.join(programFiles, "Antigravity", "agy.exe"),
+            path.join(programFiles, "antigravity", "agy.exe"),
+            path.join(programFilesX86, "Antigravity", "agy.exe"),
+            path.join(localAppData, "Microsoft", "WindowsApps", "agy.exe"),
+        ];
+
+        for (const cand of winCandidates) {
+            if (cand && fs.existsSync(cand)) {
+                cachedAgyBin = cand;
+                lastAgyBinCheck = now;
+                return cand;
+            }
+        }
+
+        try {
+            const out = execFileSync("where.exe", ["agy"], {
+                encoding: "utf-8",
+                timeout: 3000,
+                windowsHide: true,
+            });
+            const lines = out.split(/\\r?\\n/).map(l => l.trim()).filter(Boolean);
+            const exeMatch = lines.find(l => /\\.exe$/i.test(l) && fs.existsSync(l));
+            if (exeMatch) {
+                cachedAgyBin = exeMatch;
+                lastAgyBinCheck = now;
+                return exeMatch;
+            }
+            const scriptMatch = lines.find(l => /\\.(cmd|bat)$/i.test(l) && fs.existsSync(l));
+            if (scriptMatch) {
+                cachedAgyBin = scriptMatch;
+                lastAgyBinCheck = now;
+                return scriptMatch;
+            }
+            if (lines.length > 0 && fs.existsSync(lines[0])) {
+                cachedAgyBin = lines[0];
+                lastAgyBinCheck = now;
+                return lines[0];
+            }
+        } catch {}
+
+        cachedAgyBin = "agy.exe";
+        lastAgyBinCheck = now;
+        return cachedAgyBin;
+    } else {
+        const posixCandidates = [
+            path.join(home, ".local", "bin", "agy"),
+            "/usr/local/bin/agy",
+            "/usr/bin/agy",
+            "/opt/homebrew/bin/agy",
+        ];
+        for (const cand of posixCandidates) {
+            if (fs.existsSync(cand)) {
+                cachedAgyBin = cand;
+                lastAgyBinCheck = now;
+                return cand;
+            }
+        }
+        try {
+            const out = execFileSync("which", ["agy"], {
+                encoding: "utf-8",
+                timeout: 3000,
+            }).trim();
+            if (out && fs.existsSync(out)) {
+                cachedAgyBin = out;
+                lastAgyBinCheck = now;
+                return out;
+            }
+        } catch {}
+
+        cachedAgyBin = "agy";
+        lastAgyBinCheck = now;
+        return cachedAgyBin;
+    }
+}
+
+function toneFromUsedPct(usedPct) {
+    if (usedPct >= 90) return "critical";
+    if (usedPct >= 75) return "warn";
+    return "ok";
+}
+
+export async function fetchAntigravityUsage() {
+    const now = Date.now();
+    if (lastSuccessfulPluginQuota && (now - lastSuccessfulPluginQuotaTime < PLUGIN_QUOTA_CACHE_TTL_MS)) {
+        return lastSuccessfulPluginQuota;
+    }
+
+    try {
+        const bin = resolveAgyBinary();
+        const isWin = process.platform === "win32";
+        const isBatch = isWin && /\\.(cmd|bat)$/i.test(bin);
+
+        let usageOut = "";
+        try {
+            usageOut = execFileSync(bin, ["--print-timeout", "24h", "--print", "/usage"], {
+                encoding: "utf-8",
+                timeout: 30000,
+                windowsHide: true,
+                shell: isBatch,
+            });
+        } catch (usageErr) {
+            if (lastSuccessfulPluginQuota) return lastSuccessfulPluginQuota;
+            throw usageErr;
+        }
+
+        let creditsOut = "";
+        try {
+            creditsOut = execFileSync(bin, ["--print-timeout", "24h", "--print", "/credits"], {
+                encoding: "utf-8",
+                timeout: 6000,
+                windowsHide: true,
+                shell: isBatch,
+            });
+        } catch {}
+
+        const normalizedUsage = usageOut.replace(/\\r\\n/g, "\\n");
+        const lines = normalizedUsage.split("\\n");
+        const rawWindows = [];
+        let currentModel = "";
+
+        for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line) continue;
+
+            if (line.endsWith(":") && !line.includes("%")) {
+                currentModel = line.slice(0, -1).trim();
+                continue;
+            }
+
+            const isGemini = /gemini/i.test(currentModel) || !/claude/i.test(currentModel);
+            const match = line.match(/^([A-Za-z0-9\\s_-]+):\\s*(\\d+)%\\s*(?:used)?(?:\\s*\\((?:resets?\\s+in\\s+)?([^)]+)\\))?/i);
+            if (match) {
+                const limitType = match[1].trim();
+                const usedPct = parseInt(match[2], 10);
+                const resetStr = match[3] ? match[3].trim() : null;
+
+                let resetsAt = null;
+                if (resetStr) {
+                    const durMatch = resetStr.match(/(?:(\\d+)h)?\\s*(?:(\\d+)m)?/i);
+                    if (durMatch && (durMatch[1] || durMatch[2])) {
+                        const h = parseInt(durMatch[1] || "0", 10);
+                        const m = parseInt(durMatch[2] || "0", 10);
+                        resetsAt = new Date(Date.now() + (h * 3600 + m * 60) * 1000).toISOString();
+                    } else {
+                        const parsed = Date.parse(resetStr);
+                        if (!isNaN(parsed)) resetsAt = new Date(parsed).toISOString();
+                    }
+                }
+
+                const isFiveHour = /session|5-?hour|5h/i.test(limitType);
+                const isWeekly = /week|7-?day/i.test(limitType);
+
+                let id = isFiveHour ? "session" : isWeekly ? "weekly" : "quota";
+                let label = isFiveHour ? "Session" : isWeekly ? "Weekly" : limitType.replace(/\\s+Remaining$/i, "");
+                if (!isGemini) {
+                    id = \`claude_\${id}\`;
+                    label = \`Claude \${label}\`;
+                }
+
+                rawWindows.push({
+                    id,
+                    label,
+                    shortLabel: isFiveHour ? "5h" : isWeekly ? "wk" : "",
+                    summary: true,
+                    usedPct,
+                    remainingPct: Math.max(0, 100 - usedPct),
+                    resetsAt,
+                    tone: toneFromUsedPct(usedPct),
+                    isFiveHour,
+                    isGemini,
+                });
+            }
+        }
+
+        rawWindows.sort((a, b) => {
+            if (a.isGemini && !b.isGemini) return -1;
+            if (!a.isGemini && b.isGemini) return 1;
+            if (a.isFiveHour && !b.isFiveHour) return -1;
+            if (!a.isFiveHour && b.isFiveHour) return 1;
+            return 0;
+        });
+
+        const windows = rawWindows.map(w => ({
+            id: w.id,
+            label: w.label,
+            shortLabel: w.shortLabel,
+            summary: w.summary,
+            usedPct: w.usedPct,
+            remainingPct: w.remainingPct,
+            resetsAt: w.resetsAt,
+            tone: w.tone,
+        }));
+
+        const balances = [];
+        const credMatch = creditsOut.match(/Remaining\\s+credits\\s+([\\d.]+)/i);
+        const remainingCredits = credMatch ? parseFloat(credMatch[1]) : 0;
+        balances.push({
+            id: "credits",
+            label: "Credits",
+            remaining: remainingCredits,
+            unit: "usd",
+            tone: remainingCredits > 0 ? "ok" : "default",
+        });
+
+        const result = {
+            status: "available",
+            planLabel: "Google Gemini",
+            windows,
+            balances,
+            details: [],
+        };
+        lastSuccessfulPluginQuota = result;
+        lastSuccessfulPluginQuotaTime = Date.now();
+        return result;
+    } catch (err) {
+        if (lastSuccessfulPluginQuota) return lastSuccessfulPluginQuota;
+        return {
+            status: "error",
+            error: err instanceof Error ? err.message : String(err),
+        };
+    }
+}
+
+export function registerAntigravityUsageSource(server) {
+    if (!server || typeof server.registerUsageSource !== "function") return;
+    try {
+        server.registerUsageSource({
+            id: "antigravity",
+            label: "Antigravity",
+            icon: "icon.svg",
+            input: z.object({}).passthrough(),
+            discover: async (scope) => {
+                if (scope && scope.kind === "session" && scope.provider && scope.provider !== "antigravity") {
+                    return [];
+                }
+                return [{ key: "default", label: "Antigravity", input: {} }];
+            },
+            fetch: async () => {
+                return fetchAntigravityUsage();
+            },
+        });
+    } catch (err) {
+        console.warn("[antigravity-provider] Failed to register usage source:", err);
+    }
+}
+`;
+}
+
+/**
  * Patches a Paseo server installation directory to enable Antigravity:
- * 1. Patches quota-fetcher/manifest.js to register Antigravity
- * 2. Writes quota-fetcher/providers/antigravity.js
+ * 1. For Paseo 0.11+: patches builtin-plugins/antigravity-provider with usage source
+ * 2. For Paseo <= 0.10: patches quota-fetcher/manifest.js and writes providers/antigravity.js
  * 3. Patches acp-agent.js to map context window tokens and emit usage updates
  */
 export function patchPaseoServer(serverDir: string): { success: boolean; changes: string[]; error?: string } {
   const changes: string[] = [];
   try {
-    // 1. Locate manifest.js in quota-fetcher
+    // 1. Check for Paseo 0.11+ builtin-plugins/antigravity-provider
+    const pluginDirCandidates = [
+      path.join(serverDir, "dist", "server", "builtin-plugins", "antigravity-provider"),
+      path.join(serverDir, "dist", "builtin-plugins", "antigravity-provider"),
+      path.join(serverDir, "builtin-plugins", "antigravity-provider"),
+    ];
+    let pluginDir = pluginDirCandidates.find((d) => fs.existsSync(d));
+
+    if (!pluginDir && fs.existsSync(path.join(serverDir, "dist"))) {
+      const findPlugin = (dir: string, depth = 0): string | null => {
+        if (depth > 5) return null;
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isDirectory() && e.name !== "node_modules") {
+              if (e.name === "antigravity-provider") return full;
+              const found = findPlugin(full, depth + 1);
+              if (found) return found;
+            }
+          }
+        } catch {}
+        return null;
+      };
+      pluginDir = findPlugin(path.join(serverDir, "dist")) || undefined;
+    }
+
+    if (pluginDir) {
+      const serverSubdir = path.join(pluginDir, "server");
+      if (!fs.existsSync(serverSubdir)) {
+        fs.mkdirSync(serverSubdir, { recursive: true });
+      }
+
+      // Write / update usage.ts
+      const usageTsPath = path.join(serverSubdir, "usage.ts");
+      fs.writeFileSync(usageTsPath, generateAntigravityPluginUsageTs(), "utf-8");
+      changes.push(`Created/Updated ${usageTsPath}`);
+
+      // Locate index.server.ts and/or index.server.js
+      const indexCandidates = [
+        path.join(pluginDir, "index.server.ts"),
+        path.join(pluginDir, "index.server.js"),
+      ].filter((f) => fs.existsSync(f));
+
+      for (const indexFile of indexCandidates) {
+        let indexCode = fs.readFileSync(indexFile, "utf-8");
+        let indexModified = false;
+
+        if (!indexCode.includes("registerAntigravityUsageSource")) {
+          // Add import
+          if (!indexCode.includes('from "./server/usage.js"')) {
+            indexCode = `import { registerAntigravityUsageSource } from "./server/usage.js";\n` + indexCode;
+            indexModified = true;
+          }
+
+          // Inject registration call into contribute function
+          const contributeMatch = indexCode.match(/(export\s+default\s+function\s+contribute\s*\([^)]*\)\s*\{)([\s\S]*?)(\})/);
+          if (contributeMatch) {
+            const before = contributeMatch[1];
+            const body = contributeMatch[2];
+            const after = contributeMatch[3];
+            if (!body.includes("registerAntigravityUsageSource")) {
+              const patchedBody = body.replace(
+                /return\s+\(\)\s*=>\s*\{[^}]*\};?/,
+                (m) => `server.registerUsageSource ? registerAntigravityUsageSource(server) : null;\n  ${m}`
+              );
+              if (patchedBody !== body) {
+                indexCode = indexCode.replace(contributeMatch[0], `${before}${patchedBody}${after}`);
+                indexModified = true;
+              } else {
+                indexCode = indexCode.replace(
+                  contributeMatch[0],
+                  `${before}${body}\n  server.registerUsageSource ? registerAntigravityUsageSource(server) : null;\n${after}`
+                );
+                indexModified = true;
+              }
+            }
+          }
+        }
+
+        if (indexModified) {
+          fs.writeFileSync(indexFile, indexCode, "utf-8");
+          changes.push(`Patched ${indexFile} with registerAntigravityUsageSource`);
+        }
+      }
+    }
+
+    // 2. Check for Paseo <= 0.10 legacy quota-fetcher/manifest.js
     const manifestCandidates = [
       path.join(serverDir, "dist", "server", "services", "quota-fetcher", "manifest.js"),
       path.join(serverDir, "dist", "services", "quota-fetcher", "manifest.js"),
@@ -598,7 +1010,7 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
       }
     }
 
-    // 2. Locate acp-agent.js
+    // 3. Locate acp-agent.js
     const acpCandidates = [
       path.join(serverDir, "dist", "server", "server", "agent", "providers", "acp-agent.js"),
       path.join(serverDir, "dist", "server", "agent", "providers", "acp-agent.js"),
@@ -628,11 +1040,18 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
       let acpModified = false;
 
       // Patch mapACPUsage
-      if (!acpCode.includes("contextWindowMaxTokens: usage.contextWindowMaxTokens")) {
+      if (!acpCode.includes("contextWindowMaxTokens: usage.contextWindowMaxTokens") || !acpCode.includes("Math.min(usedTokens, maxTokens)")) {
         const oldMapRegex = /export\s+function\s+mapACPUsage\s*\([^)]*\)\s*\{[\s\S]*?return\s*\{[\s\S]*?\};\s*\}/m;
         const newMap = `export function mapACPUsage(usage) {
     if (!usage) {
         return undefined;
+    }
+    const maxTokens = usage.contextWindowMaxTokens ?? usage.size ?? undefined;
+    let usedTokens = usage.contextWindowUsedTokens ?? usage.used ?? undefined;
+    if (typeof usedTokens === "number" && typeof maxTokens === "number" && maxTokens > 0) {
+        if (usedTokens > maxTokens) {
+            usedTokens = Math.min(usedTokens, maxTokens);
+        }
     }
     return {
         inputTokens: usage.inputTokens ?? undefined,
@@ -640,7 +1059,7 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
         cachedInputTokens: usage.cachedReadTokens ?? usage.cachedInputTokens ?? undefined,
         totalCostUsd: usage.totalCostUsd ?? (usage.cost?.amount !== undefined ? Number(usage.cost.amount) : undefined),
         contextWindowMaxTokens: usage.contextWindowMaxTokens ?? usage.size ?? undefined,
-        contextWindowUsedTokens: usage.contextWindowUsedTokens ?? usage.used ?? undefined,
+        contextWindowUsedTokens: usedTokens,
     };
 }`;
         if (oldMapRegex.test(acpCode)) {
@@ -681,7 +1100,7 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
           }
           if (depth === 0) {
             const currentMethodBody = acpCode.slice(startIdx, i);
-            const needsPatch = !currentMethodBody.includes('type: "usage_updated"') || currentMethodBody.includes("this.notifySubscribers");
+            const needsPatch = !currentMethodBody.includes("this.currentTurnUsage =") || currentMethodBody.includes("this.notifySubscribers");
             if (needsPatch) {
               const indent = methodMatch[1] || "    ";
               const newHandler = `${indent}handleUsageUpdate(update) {
@@ -1014,66 +1433,111 @@ export function isPaseoServerPatched(serverDir: string): boolean {
   try {
     if (!fs.existsSync(serverDir)) return false;
 
-    // 1. Antigravity quota provider file
-    const antigravityJsCandidates = [
-      path.join(serverDir, "dist", "server", "services", "quota-fetcher", "providers", "antigravity.js"),
-      path.join(serverDir, "dist", "services", "quota-fetcher", "providers", "antigravity.js"),
+    // 1. Check for Paseo 0.11+ builtin-plugins/antigravity-provider
+    const pluginDirCandidates = [
+      path.join(serverDir, "dist", "server", "builtin-plugins", "antigravity-provider"),
+      path.join(serverDir, "dist", "builtin-plugins", "antigravity-provider"),
+      path.join(serverDir, "builtin-plugins", "antigravity-provider"),
     ];
-    let hasProvider = antigravityJsCandidates.some((p) => fs.existsSync(p));
+    let pluginDir = pluginDirCandidates.find((d) => fs.existsSync(d));
 
-    if (!hasProvider && fs.existsSync(path.join(serverDir, "dist"))) {
-      const checkRecursive = (dir: string, depth = 0): boolean => {
-        if (depth > 5) return false;
-        try {
-          const entries = fs.readdirSync(dir, { withFileTypes: true });
-          for (const e of entries) {
-            if (e.isDirectory() && e.name !== "node_modules") {
-              if (checkRecursive(path.join(dir, e.name), depth + 1)) return true;
-            } else if (e.isFile() && e.name === "antigravity.js" && dir.replace(/\\/g, "/").includes("quota-fetcher")) {
-              return true;
-            }
-          }
-        } catch {}
-        return false;
-      };
-      hasProvider = checkRecursive(path.join(serverDir, "dist"));
-    }
-
-    if (!hasProvider) return false;
-
-    // 2. Manifest check
-    const manifestCandidates = [
-      path.join(serverDir, "dist", "server", "services", "quota-fetcher", "manifest.js"),
-      path.join(serverDir, "dist", "services", "quota-fetcher", "manifest.js"),
-    ];
-    let manifestFile = manifestCandidates.find((f) => fs.existsSync(f));
-    if (!manifestFile && fs.existsSync(path.join(serverDir, "dist"))) {
-      const findManifest = (dir: string, depth = 0): string | null => {
+    if (!pluginDir && fs.existsSync(path.join(serverDir, "dist"))) {
+      const findPlugin = (dir: string, depth = 0): string | null => {
         if (depth > 5) return null;
         try {
           const entries = fs.readdirSync(dir, { withFileTypes: true });
           for (const e of entries) {
             const full = path.join(dir, e.name);
             if (e.isDirectory() && e.name !== "node_modules") {
-              const found = findManifest(full, depth + 1);
+              if (e.name === "antigravity-provider") return full;
+              const found = findPlugin(full, depth + 1);
               if (found) return found;
-            } else if (e.isFile() && e.name === "manifest.js" && dir.replace(/\\/g, "/").includes("quota-fetcher")) {
-              return full;
             }
           }
         } catch {}
         return null;
       };
-      manifestFile = findManifest(path.join(serverDir, "dist")) || undefined;
+      pluginDir = findPlugin(path.join(serverDir, "dist")) || undefined;
     }
-    if (manifestFile) {
-      const content = fs.readFileSync(manifestFile, "utf-8");
-      if (!content.includes('providerId: "antigravity"')) {
-        return false;
+
+    if (pluginDir) {
+      // Paseo 0.11+ architecture
+      const usageFile = [
+        path.join(pluginDir, "server", "usage.ts"),
+        path.join(pluginDir, "server", "usage.js"),
+      ].find((f) => fs.existsSync(f));
+      if (!usageFile) return false;
+
+      const indexFile = [
+        path.join(pluginDir, "index.server.ts"),
+        path.join(pluginDir, "index.server.js"),
+      ].find((f) => fs.existsSync(f));
+      if (!indexFile) return false;
+
+      const indexContent = fs.readFileSync(indexFile, "utf-8");
+      if (!indexContent.includes("registerAntigravityUsageSource")) return false;
+    } else {
+      // Paseo <= 0.10 legacy architecture
+      const antigravityJsCandidates = [
+        path.join(serverDir, "dist", "server", "services", "quota-fetcher", "providers", "antigravity.js"),
+        path.join(serverDir, "dist", "services", "quota-fetcher", "providers", "antigravity.js"),
+      ];
+      let hasProvider = antigravityJsCandidates.some((p) => fs.existsSync(p));
+
+      if (!hasProvider && fs.existsSync(path.join(serverDir, "dist"))) {
+        const checkRecursive = (dir: string, depth = 0): boolean => {
+          if (depth > 5) return false;
+          try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const e of entries) {
+              if (e.isDirectory() && e.name !== "node_modules") {
+                if (checkRecursive(path.join(dir, e.name), depth + 1)) return true;
+              } else if (e.isFile() && e.name === "antigravity.js" && dir.replace(/\\/g, "/").includes("quota-fetcher")) {
+                return true;
+              }
+            }
+          } catch {}
+          return false;
+        };
+        hasProvider = checkRecursive(path.join(serverDir, "dist"));
+      }
+
+      if (!hasProvider) return false;
+
+      // Manifest check
+      const manifestCandidates = [
+        path.join(serverDir, "dist", "server", "services", "quota-fetcher", "manifest.js"),
+        path.join(serverDir, "dist", "services", "quota-fetcher", "manifest.js"),
+      ];
+      let manifestFile = manifestCandidates.find((f) => fs.existsSync(f));
+      if (!manifestFile && fs.existsSync(path.join(serverDir, "dist"))) {
+        const findManifest = (dir: string, depth = 0): string | null => {
+          if (depth > 5) return null;
+          try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const e of entries) {
+              const full = path.join(dir, e.name);
+              if (e.isDirectory() && e.name !== "node_modules") {
+                const found = findManifest(full, depth + 1);
+                if (found) return found;
+              } else if (e.isFile() && e.name === "manifest.js" && dir.replace(/\\/g, "/").includes("quota-fetcher")) {
+                return full;
+              }
+            }
+          } catch {}
+          return null;
+        };
+        manifestFile = findManifest(path.join(serverDir, "dist")) || undefined;
+      }
+      if (manifestFile) {
+        const content = fs.readFileSync(manifestFile, "utf-8");
+        if (!content.includes('providerId: "antigravity"')) {
+          return false;
+        }
       }
     }
 
-    // 3. ACP Agent check (context window telemetry & usage updates)
+    // 2. ACP Agent check (common to both architectures)
     const acpCandidates = [
       path.join(serverDir, "dist", "server", "server", "agent", "providers", "acp-agent.js"),
       path.join(serverDir, "dist", "server", "agent", "providers", "acp-agent.js"),
@@ -1101,7 +1565,7 @@ export function isPaseoServerPatched(serverDir: string): boolean {
     }
     if (acpFile) {
       const content = fs.readFileSync(acpFile, "utf-8");
-      if (!content.includes('type: "usage_updated"') || !content.includes("contextWindowMaxTokens")) {
+      if (!content.includes("this.currentTurnUsage =") || !content.includes("contextWindowMaxTokens")) {
         return false;
       }
     }
@@ -1119,7 +1583,11 @@ export async function isPaseoAsarPatched(asarPath: string): Promise<boolean> {
   try {
     if (!fs.existsSync(asarPath)) return false;
     const files = listPackage(asarPath);
-    return files.some((f) => f.replace(/\\/g, "/").includes("quota-fetcher/providers/antigravity.js"));
+    return files.some((f) => {
+      const norm = f.replace(/\\/g, "/");
+      return norm.includes("quota-fetcher/providers/antigravity.js") ||
+             norm.includes("antigravity-provider/server/usage.");
+    });
   } catch {
     return false;
   }

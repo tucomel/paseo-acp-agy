@@ -191,7 +191,9 @@ export class Session {
       cache_read_tokens?: number;
       total_tokens?: number;
     },
-    executingModel: string = this.model
+    executingModel: string = this.model,
+    latestStepContextTokens?: number,
+    numSteps = 1
   ) {
     if (!turnUsage) return;
     const input = turnUsage.input_tokens || 0;
@@ -205,10 +207,27 @@ export class Session {
     this.usage.totalTokens = this.usage.inputTokens + this.usage.outputTokens;
     // Keep the accumulator unrounded. Micro-costs must survive across turns.
     this.usage.totalCostUsd += turnCost;
-    this.usage.contextWindowUsedTokens = input + output;
-    // The selected model may have changed while this turn was running. Keep
-    // the stored meter aligned with the model currently selected for next turn.
+
+    // Keep the stored meter aligned with the model currently selected for next turn,
+    // but evaluate turn occupancy against the model that executed this turn.
+    const executingMaxTokens = getModelContextWindow(executingModel);
     this.usage.contextWindowMaxTokens = getModelContextWindow(this.model);
+
+    // Context window represents the active prompt memory buffer of the model.
+    // If we observed the latest step's context window size, use it directly.
+    // Otherwise, if input + output exceeds executingMaxTokens, it is an accumulation
+    // across multiple steps in the turn; derive the single-step context footprint.
+    let activeContextTokens = latestStepContextTokens;
+    if (!activeContextTokens || activeContextTokens <= 0) {
+      const rawTurnTokens = input + output;
+      if (rawTurnTokens > executingMaxTokens && numSteps > 1) {
+        activeContextTokens = Math.round(rawTurnTokens / numSteps);
+      } else {
+        activeContextTokens = rawTurnTokens;
+      }
+    }
+
+    this.usage.contextWindowUsedTokens = Math.min(activeContextTokens, executingMaxTokens);
 
     this.persist();
   }

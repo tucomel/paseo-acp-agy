@@ -9,6 +9,7 @@ import {
   patchPaseoAsar,
   ensurePaseoIntegration,
   generateAntigravityQuotaProviderJs,
+  generateAntigravityPluginUsageTs,
   isPaseoServerPatched,
   isPaseoAsarPatched,
   isPaseoRunning,
@@ -38,9 +39,13 @@ describe("Paseo Patcher & Telemetry Integration", () => {
     expect(js).toContain("Remaining");
     expect(js).toContain("fetchUsage()");
 
-    // Verify Windows-specific fixes
+    // Verify Windows-specific fixes & quota resilience
     expect(js).toContain("BIN_CACHE_TTL_MS = 86400000");
     expect(js).toContain("cachedAgyBin");
+    expect(js).toContain("QUOTA_CACHE_TTL_MS = 60000");
+    expect(js).toContain("lastSuccessfulQuota");
+    expect(js).toContain("timeout: 30000");
+    expect(js).toContain("timeout: 6000");
     expect(js).toContain("exeCandidates = [");
     expect(js).toContain("shell: isBatch");
     expect(js).toContain("windowsHide: true");
@@ -112,6 +117,7 @@ class ACPAgentSession {
     // Verify acp-agent.js
     const updatedAcp = fs.readFileSync(acpAgentPath, "utf-8");
     expect(updatedAcp).toContain("contextWindowMaxTokens: usage.contextWindowMaxTokens ?? usage.size ?? undefined");
+    expect(updatedAcp).toContain("Math.min(usedTokens, maxTokens)");
     expect(updatedAcp).toContain("deliverTranslatedEvents");
     expect(updatedAcp).toContain('type: "usage_updated"');
   });
@@ -382,5 +388,146 @@ class ACPAgentSession {
     expect(paths).toContain(path.resolve(mockAsar));
 
     delete process.env.PASEO_ASAR_PATH;
+  });
+
+  it("should generate valid Paseo 0.11+ Plugin Usage TypeScript source with Windows fixes", () => {
+    const ts = generateAntigravityPluginUsageTs();
+    expect(ts).toContain("export function registerAntigravityUsageSource");
+    expect(ts).toContain("export async function fetchAntigravityUsage");
+    expect(ts).toContain('id: "antigravity"');
+    expect(ts).toContain('label: "Antigravity"');
+    expect(ts).toContain('icon: "icon.svg"');
+    expect(ts).toContain("resolveAgyBinary()");
+    expect(ts).toContain("Google Gemini");
+    expect(ts).toContain("Remaining");
+
+    // Verify Windows-specific fixes
+    expect(ts).toContain("RESOLVE_TTL_MS = 30000");
+    expect(ts).toContain("cachedAgyBin");
+    expect(ts).toContain("winCandidates = [");
+    expect(ts).toContain("shell: isBatch");
+    expect(ts).toContain("windowsHide: true");
+    expect(ts).toContain("replace(/\\r\\n/g, \"\\n\")");
+    expect(ts).not.toContain('bin = `"${bin}"`');
+    expect(ts).toContain('status: "available"');
+    expect(ts).toContain("windows");
+    expect(ts).toContain("balances");
+    expect(ts).toContain("claude_");
+  });
+
+  it("should patch a simulated Paseo 0.11.0 installation (builtin-plugins and stock acp-agent.js)", () => {
+    // 1. Set up simulated Paseo 0.11.0 builtin-plugins/antigravity-provider
+    const pluginDir = path.join(tempDir, "dist", "server", "builtin-plugins", "antigravity-provider");
+    fs.mkdirSync(pluginDir, { recursive: true });
+    const indexPath = path.join(pluginDir, "index.server.ts");
+    fs.writeFileSync(
+      indexPath,
+      `import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { createAntigravityProvider } from "./server/provider.js";
+
+export default function contribute(server: PluginServerContext) {
+  server.registerProvider(createAntigravityProvider());
+  return () => {};
+}
+`,
+      "utf-8"
+    );
+
+    // 2. Set up simulated stock Paseo 0.11.0 acp-agent.js
+    const agentDir = path.join(tempDir, "dist", "server", "server", "agent", "providers");
+    fs.mkdirSync(agentDir, { recursive: true });
+    const acpAgentPath = path.join(agentDir, "acp-agent.js");
+    fs.writeFileSync(
+      acpAgentPath,
+      `export function mapACPUsage(usage) {
+    if (!usage) {
+        return undefined;
+    }
+    return {
+        inputTokens: usage.inputTokens ?? undefined,
+        outputTokens: usage.outputTokens ?? undefined,
+        cachedInputTokens: usage.cachedReadTokens ?? usage.cachedInputTokens ?? undefined,
+        totalCostUsd: usage.totalCostUsd ?? (usage.cost?.amount !== undefined ? Number(usage.cost.amount) : undefined),
+        contextWindowMaxTokens: usage.contextWindowMaxTokens ?? usage.size ?? undefined,
+        contextWindowUsedTokens: usage.contextWindowUsedTokens ?? usage.used ?? undefined,
+    };
+}
+
+class ACPAgentSession {
+    handleUsageUpdate(update) {
+        const contextWindowMaxTokens = Number.isFinite(update.size) && update.size > 0 ? update.size : undefined;
+        const contextWindowUsedTokens = Number.isFinite(update.used) && update.used >= 0 ? update.used : undefined;
+        if (contextWindowMaxTokens === undefined || contextWindowUsedTokens === undefined) {
+            return;
+        }
+        this.pushEvent({
+            type: "usage_updated",
+            provider: this.provider,
+            usage: {
+                ...this.currentTurnUsage,
+                contextWindowMaxTokens,
+                contextWindowUsedTokens,
+            },
+            turnId: this.activeForegroundTurnId ?? undefined,
+        });
+    }
+}
+`,
+      "utf-8"
+    );
+
+    // Before patching: isPaseoServerPatched must report false
+    expect(isPaseoServerPatched(tempDir)).toBe(false);
+
+    // Apply patch
+    const patchResult = patchPaseoServer(tempDir);
+    expect(patchResult.success).toBe(true);
+    expect(patchResult.changes.some((c) => c.includes("usage.ts"))).toBe(true);
+    expect(patchResult.changes.some((c) => c.includes("index.server.ts"))).toBe(true);
+    expect(patchResult.changes.some((c) => c.includes("acp-agent.js"))).toBe(true);
+
+    // Verify usage.ts was created
+    const usageTsPath = path.join(pluginDir, "server", "usage.ts");
+    expect(fs.existsSync(usageTsPath)).toBe(true);
+
+    // Verify index.server.ts calls registerAntigravityUsageSource
+    const updatedIndex = fs.readFileSync(indexPath, "utf-8");
+    expect(updatedIndex).toContain('import { registerAntigravityUsageSource } from "./server/usage.js"');
+    expect(updatedIndex).toContain("registerAntigravityUsageSource(server)");
+
+    // Verify acp-agent.js persists this.currentTurnUsage
+    const updatedAcp = fs.readFileSync(acpAgentPath, "utf-8");
+    expect(updatedAcp).toContain("this.currentTurnUsage = { ...this.currentTurnUsage, ...usage };");
+
+    // After patching: isPaseoServerPatched must report true
+    expect(isPaseoServerPatched(tempDir)).toBe(true);
+
+    // Second run must be idempotent
+    const secondResult = patchPaseoServer(tempDir);
+    expect(secondResult.success).toBe(true);
+    expect(secondResult.changes.some((c) => c.includes("index.server.ts"))).toBe(false);
+    expect(secondResult.changes.some((c) => c.includes("acp-agent.js"))).toBe(false);
+  });
+
+  it("should accurately report isPaseoAsarPatched for Paseo 0.11.0 asar archives", async () => {
+    const asarSrcDir = path.join(tempDir, "mock-app-0.11");
+    const pluginDir = path.join(
+      asarSrcDir,
+      "node_modules",
+      "@getpaseo",
+      "server",
+      "dist",
+      "server",
+      "builtin-plugins",
+      "antigravity-provider",
+      "server"
+    );
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(path.join(pluginDir, "usage.ts"), "// usage source");
+
+    const asarPath = path.join(tempDir, "paseo-0.11.asar");
+    await createPackage(asarSrcDir, asarPath);
+
+    expect(await isPaseoAsarPatched(asarPath)).toBe(true);
   });
 });

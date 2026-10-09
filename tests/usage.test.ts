@@ -513,5 +513,77 @@ Claude and GPT models\tFive Hour Limit Remaining\t20%\t2026-09-03T06:21:47Z
 
       await harness.server.stop();
     });
+
+    it("correctly clamps and isolates context window occupancy when multi-step agentic turn accumulates large billable tokens (> 1M)", async () => {
+      const store = new SessionStore(path.join(tempDir, "multistep-large-turn"));
+      const manager = new SessionManager({ store });
+      const session = manager.createSession({ cwd: tempDir, model: "gemini-3.8-flash" });
+
+      // Simulate a turn that executes 15 tool calls:
+      // Total billable input tokens across all calls = 3,000,000 tokens (billable cost $0.30+)
+      // Latest step's active context = 210,000 tokens
+      vi.spyOn(session.process, "sendPrompt").mockImplementation(async (_text, onStepUpdate) => {
+        onStepUpdate?.({
+          event: "step_update",
+          step_update: {
+            conversation_id: session.id,
+            step_index: 1,
+            state: "ACTIVE",
+            step_type: "agent_response",
+            usage: { input_tokens: 180_000, output_tokens: 500 },
+          },
+        });
+        onStepUpdate?.({
+          event: "step_update",
+          step_update: {
+            conversation_id: session.id,
+            step_index: 2,
+            state: "ACTIVE",
+            step_type: "tool",
+            tool_name: "view_file",
+            usage: { input_tokens: 210_000, output_tokens: 1_200 },
+          },
+        });
+        return {
+          event: "result",
+          result: {
+            conversation_id: session.id,
+            status: "SUCCESS",
+            response: "completed complex multi-step work",
+            num_turns: 15,
+            usage: { input_tokens: 3_000_000, output_tokens: 20_000, cache_read_tokens: 50_000 },
+          },
+        };
+      });
+
+      const harness = makeRpcHarness(manager);
+      harness.send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "session/prompt",
+        params: { sessionId: session.id, prompt: "do complex work" },
+      });
+
+      const response = await harness.waitForResponse(3);
+      expect(response.result.stopReason).toBe("end_turn");
+
+      // Billable accounting must accurately record the 3M billable tokens and cost
+      expect(session.usage.inputTokens).toBe(3_000_000);
+      expect(session.usage.outputTokens).toBe(20_000);
+      expect(session.usage.totalTokens).toBe(3_020_000);
+      expect(session.usage.totalCostUsd).toBeGreaterThan(0.3);
+
+      // Context Window Meter (rodinha) must report active turn footprint (<= 1,048,576), NEVER 290% (3,000,000)
+      expect(session.usage.contextWindowMaxTokens).toBe(1_048_576);
+      expect(session.usage.contextWindowUsedTokens).toBeLessThanOrEqual(1_048_576);
+      expect(session.usage.contextWindowUsedTokens).toBe(211_200);
+
+      // Final response payload must match
+      expect(response.result.usage.size).toBe(1_048_576);
+      expect(response.result.usage.used).toBe(211_200);
+
+      await harness.server.stop();
+    });
   });
 });
+

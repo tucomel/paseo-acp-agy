@@ -121,12 +121,14 @@ export class ACPServer {
 
   private publishUsageUpdate(session: Session) {
     const costUsd = roundUsageCostUsd(session.usage.totalCostUsd);
+    const maxTokens = session.usage.contextWindowMaxTokens;
+    const usedTokens = Math.min(session.usage.contextWindowUsedTokens, maxTokens);
     this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
       sessionId: session.id,
       update: {
         sessionUpdate: "usage_update",
-        size: session.usage.contextWindowMaxTokens,
-        used: session.usage.contextWindowUsedTokens,
+        size: maxTokens,
+        used: usedTokens,
         cost: { amount: costUsd, currency: "USD" },
         inputTokens: session.usage.inputTokens,
         outputTokens: session.usage.outputTokens,
@@ -134,8 +136,8 @@ export class ACPServer {
         cachedInputTokens: session.usage.cachedInputTokens,
         totalTokens: session.usage.totalTokens,
         totalCostUsd: costUsd,
-        contextWindowMaxTokens: session.usage.contextWindowMaxTokens,
-        contextWindowUsedTokens: session.usage.contextWindowUsedTokens,
+        contextWindowMaxTokens: maxTokens,
+        contextWindowUsedTokens: usedTokens,
       },
     });
   }
@@ -191,7 +193,7 @@ export class ACPServer {
     const thought = turnUsage?.thinking_tokens;
     const total = turnUsage?.total_tokens ?? (input + output);
     const maxTokens = getModelContextWindow(executingModel || session.model);
-    const usedTokens = session.usage.contextWindowUsedTokens;
+    const usedTokens = Math.min(session.usage.contextWindowUsedTokens, maxTokens);
     const costUsd = roundUsageCostUsd(session.usage.totalCostUsd);
 
     return {
@@ -423,7 +425,10 @@ export class ACPServer {
             }
 
             let hasSentNonNarration = false;
+            let latestStepContextTokens: number | undefined;
+            let stepCount = 0;
             const onStepUpdate = (event: AgyStepUpdateEvent) => {
+              stepCount++;
               const step = event.step_update;
               if (!step) return;
 
@@ -505,20 +510,26 @@ export class ACPServer {
               }
 
               if (step.usage) {
-                const turnCost = calculateUsageCostUsd(
-                  executingModel,
-                  step.usage.input_tokens || 0,
-                  step.usage.output_tokens || 0,
-                  step.usage.cache_read_tokens || 0
-                );
                 const inputTokens = step.usage.input_tokens ?? 0;
                 const outputTokens = step.usage.output_tokens ?? 0;
+                if (inputTokens > 0) {
+                  latestStepContextTokens = inputTokens + outputTokens;
+                }
+                const turnCost = calculateUsageCostUsd(
+                  executingModel,
+                  inputTokens,
+                  outputTokens,
+                  step.usage.cache_read_tokens || 0
+                );
                 const cachedReadTokens = step.usage.cache_read_tokens ?? 0;
                 const thoughtTokens = step.usage.thinking_tokens;
                 const totalTokens = step.usage.total_tokens ?? (inputTokens + outputTokens);
                 const totalCostUsd = roundUsageCostUsd(session.usage.totalCostUsd + turnCost);
                 const contextWindowMaxTokens = getModelContextWindow(executingModel);
-                const contextWindowUsedTokens = inputTokens + outputTokens;
+                const contextWindowUsedTokens = Math.min(
+                  inputTokens + outputTokens,
+                  contextWindowMaxTokens
+                );
 
                 this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                   sessionId: session.id,
@@ -546,10 +557,11 @@ export class ACPServer {
                 onStepUpdate
               );
               const turnUsage = resultEvent.result?.usage;
+              const numTurns = resultEvent.result?.num_turns || stepCount || 1;
 
               // Usage is billable even when the turn terminates with ERROR
               // after model/tool work. Record it before branching on status.
-              session.recordTurnUsage(turnUsage, executingModel);
+              session.recordTurnUsage(turnUsage, executingModel, latestStepContextTokens, numTurns);
               const usagePayload = this.turnUsagePayload(session, turnUsage, executingModel);
               this.publishUsageUpdate(session);
 
