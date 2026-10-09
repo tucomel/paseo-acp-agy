@@ -584,6 +584,36 @@ Claude and GPT models\tFive Hour Limit Remaining\t20%\t2026-09-03T06:21:47Z
 
       await harness.server.stop();
     });
+
+    it("sanitizes legacy poisoned contextWindowUsedTokens when restoring persisted session", () => {
+      const storeDir = path.join(tempDir, "poisoned-sessions");
+      const store = new SessionStore(storeDir);
+      const poisonedSessionId = "poisoned-sess-123";
+      store.save({
+        sessionId: poisonedSessionId,
+        cwd: tempDir,
+        model: "gemini-3.8-flash",
+        effort: "high",
+        mode: "default",
+        usage: {
+          inputTokens: 27_000_000,
+          outputTokens: 1_800_000,
+          cachedInputTokens: 300_000_000,
+          totalTokens: 28_800_000,
+          totalCostUsd: 12.8,
+          contextWindowUsedTokens: 6_815_483,
+          contextWindowMaxTokens: 1_048_576,
+        },
+        updatedAt: new Date().toISOString(),
+      });
+
+      const manager = new SessionManager({ store });
+      const loaded = manager.createSession({ id: poisonedSessionId, cwd: tempDir });
+      expect(loaded.usage.contextWindowUsedTokens).toBeLessThanOrEqual(1_048_576);
+      expect(loaded.usage.contextWindowMaxTokens).toBe(1_048_576);
+      expect(loaded.usage.totalTokens).toBe(28_800_000);
+      expect(loaded.usage.totalCostUsd).toBe(12.8);
+    });
   });
 });
 

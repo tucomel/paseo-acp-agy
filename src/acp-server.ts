@@ -512,22 +512,22 @@ export class ACPServer {
               if (step.usage) {
                 const inputTokens = step.usage.input_tokens ?? 0;
                 const outputTokens = step.usage.output_tokens ?? 0;
-                if (inputTokens > 0) {
-                  latestStepContextTokens = inputTokens + outputTokens;
+                const cachedReadTokens = step.usage.cache_read_tokens ?? 0;
+                if (inputTokens > 0 || cachedReadTokens > 0) {
+                  latestStepContextTokens = inputTokens + cachedReadTokens + outputTokens;
                 }
                 const turnCost = calculateUsageCostUsd(
                   executingModel,
                   inputTokens,
                   outputTokens,
-                  step.usage.cache_read_tokens || 0
+                  cachedReadTokens
                 );
-                const cachedReadTokens = step.usage.cache_read_tokens ?? 0;
                 const thoughtTokens = step.usage.thinking_tokens;
                 const totalTokens = step.usage.total_tokens ?? (inputTokens + outputTokens);
                 const totalCostUsd = roundUsageCostUsd(session.usage.totalCostUsd + turnCost);
                 const contextWindowMaxTokens = getModelContextWindow(executingModel);
                 const contextWindowUsedTokens = Math.min(
-                  inputTokens + outputTokens,
+                  latestStepContextTokens ?? (inputTokens + cachedReadTokens + outputTokens),
                   contextWindowMaxTokens
                 );
 

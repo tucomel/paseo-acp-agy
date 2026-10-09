@@ -53,15 +53,22 @@ export class Session {
     this.createdAt = new Date();
     this.lastActivity = new Date();
     this.store = options.store || sessionStore;
-    this.usage = options.usage || {
-      inputTokens: 0,
-      outputTokens: 0,
-      cachedInputTokens: 0,
-      totalTokens: 0,
-      totalCostUsd: 0,
-      contextWindowUsedTokens: 0,
-      contextWindowMaxTokens: getModelContextWindow(this.model),
-    };
+    const maxTokens = getModelContextWindow(this.model);
+    this.usage = options.usage
+      ? { ...options.usage }
+      : {
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          totalTokens: 0,
+          totalCostUsd: 0,
+          contextWindowUsedTokens: 0,
+          contextWindowMaxTokens: maxTokens,
+        };
+    this.usage.contextWindowMaxTokens = maxTokens;
+    if (this.usage.contextWindowUsedTokens > maxTokens) {
+      this.usage.contextWindowUsedTokens = Math.min(this.usage.contextWindowUsedTokens, maxTokens);
+    }
 
     const isSandbox = this.permission === "sandbox" || options.sandbox;
     const isBypass = this.permission === "bypass" || options.dangerouslySkipPermissions;
@@ -222,6 +229,8 @@ export class Session {
       const rawTurnTokens = input + output;
       if (rawTurnTokens > executingMaxTokens && numSteps > 1) {
         activeContextTokens = Math.round(rawTurnTokens / numSteps);
+      } else if (rawTurnTokens > executingMaxTokens) {
+        activeContextTokens = Math.min(Math.round(rawTurnTokens / 10), executingMaxTokens);
       } else {
         activeContextTokens = rawTurnTokens;
       }

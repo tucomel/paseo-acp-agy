@@ -168,7 +168,7 @@ if (args.includes("doctor") || args.includes("--doctor")) {
       process.stdout.write("        Stop-Process -Name \"Paseo\" -Force -ErrorAction SilentlyContinue\n");
       process.stdout.write("      Then launch Paseo again.\n");
     } else {
-      process.stdout.write("      Tip: Run 'paseo daemon restart' or close the Paseo app to reload.\n");
+      process.stdout.write("      Tip: Run 'paseo restart' or close the Paseo app/daemon to reload with updated patches.\n");
     }
   } else {
     process.stdout.write("  [OK] Paseo is not currently running (safe to patch/update).\n");

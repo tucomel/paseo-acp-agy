@@ -1606,15 +1606,26 @@ export function isPaseoRunning(): boolean {
       });
       return /paseo/i.test(out) && !out.includes("INFO:") && !out.includes("No tasks");
     } else {
-      const out = execFileSync("pgrep", ["-i", "-x", "paseo"], {
+      try {
+        const out = execFileSync("pgrep", ["-i", "-f", "paseo (daemon|supervisor)|/paseo$|@getpaseo/server"], {
+          encoding: "utf-8",
+          timeout: 2000,
+        });
+        const pids = out
+          .split(/\r?\n/)
+          .map((s) => parseInt(s.trim(), 10))
+          .filter((p) => !isNaN(p) && p !== process.pid && p !== process.ppid);
+        if (pids.length > 0) return true;
+      } catch {}
+      const out2 = execFileSync("pgrep", ["-i", "-x", "paseo"], {
         encoding: "utf-8",
         timeout: 2000,
       });
-      const pids = out
+      const pids2 = out2
         .split(/\r?\n/)
         .map((s) => parseInt(s.trim(), 10))
-        .filter((p) => !isNaN(p) && p !== process.pid);
-      return pids.length > 0;
+        .filter((p) => !isNaN(p) && p !== process.pid && p !== process.ppid);
+      return pids2.length > 0;
     }
   } catch {
     return false;
