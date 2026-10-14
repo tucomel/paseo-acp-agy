@@ -143,6 +143,16 @@ export class SessionStore {
           const parsed = JSON.parse(content) as PersistedSessionState;
           if (!parsed.sessionId) continue;
 
+          // Skip untitled placeholder sessions that have neither conversationId nor any recorded usage
+          const hasTitle = Boolean(parsed.title && parsed.title.trim());
+          const hasConv = Boolean(parsed.conversationId);
+          const hasUsage = Boolean(
+            parsed.usage && (parsed.usage.totalTokens > 0 || parsed.usage.inputTokens > 0)
+          );
+          if (!hasTitle && !hasConv && !hasUsage) {
+            continue;
+          }
+
           if (normalizedTargetCwd && parsed.cwd) {
             const sessionCwd = path.resolve(parsed.cwd).toLowerCase();
             if (sessionCwd !== normalizedTargetCwd) continue;

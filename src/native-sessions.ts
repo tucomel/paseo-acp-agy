@@ -38,7 +38,7 @@ export function loadNativeAntigravitySessions(cwd?: string): SessionInfo[] {
             `SELECT conversation_id, title, preview, last_modified_time, workspace_uris
              FROM conversation_summaries
              ORDER BY last_modified_time DESC
-             LIMIT 200`
+             LIMIT 100`
           )
           .all() as Array<{
             conversation_id: string;
@@ -98,32 +98,37 @@ export function loadNativeAntigravitySessions(cwd?: string): SessionInfo[] {
     }
   }
 
-  // Fallback: Also scan brainDir for any conversation not in DB
-  try {
-    const brainDir = path.join(appDataDir, "brain");
-    if (fs.existsSync(brainDir)) {
-      const entries = fs.readdirSync(brainDir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const convId = entry.name;
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(convId)) {
-          continue;
-        }
-        if (results.some((r) => r.sessionId === convId)) continue;
+  // Fallback: Only scan brainDir if no conversations were found in DB
+  if (results.length === 0) {
+    try {
+      const brainDir = path.join(appDataDir, "brain");
+      if (fs.existsSync(brainDir)) {
+        const entries = fs.readdirSync(brainDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const convId = entry.name;
+          if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(convId)) {
+            continue;
+          }
+          if (results.some((r) => r.sessionId === convId)) continue;
 
-        const transcriptPath = path.join(brainDir, convId, ".system_generated", "logs", "transcript.jsonl");
-        if (fs.existsSync(transcriptPath)) {
-          const stat = fs.statSync(transcriptPath);
-          results.push({
-            sessionId: convId,
-            cwd: process.cwd(),
-            title: "Antigravity Session",
-            updatedAt: stat.mtime.toISOString(),
-          });
+          const transcriptPath = path.join(brainDir, convId, ".system_generated", "logs", "transcript.jsonl");
+          if (fs.existsSync(transcriptPath)) {
+            const stat = fs.statSync(transcriptPath);
+            if (stat.size > 0) {
+              results.push({
+                sessionId: convId,
+                cwd: process.cwd(),
+                title: "Antigravity Session",
+                updatedAt: stat.mtime.toISOString(),
+              });
+              if (results.length >= 50) break;
+            }
+          }
         }
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
   return results;
 }

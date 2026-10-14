@@ -400,6 +400,11 @@ export class SessionManager {
         const activeCwd = path.resolve(active.cwd).toLowerCase();
         if (targetCwd !== activeCwd) continue;
       }
+      const hasTitle = Boolean(active.title && active.title.trim());
+      const hasConv = Boolean(active.process.currentConversationId);
+      const hasUsage = Boolean(active.usage && active.usage.totalTokens > 0);
+      if (!hasTitle && !hasConv && !hasUsage) continue;
+
       const existing = sessionMap.get(active.id);
       sessionMap.set(active.id, {
         sessionId: active.id,
@@ -415,6 +420,6 @@ export class SessionManager {
       const timeB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
       return timeB - timeA;
     });
-    return list;
+    return list.slice(0, 100);
   }
 }
