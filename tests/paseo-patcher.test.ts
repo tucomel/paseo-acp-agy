@@ -495,9 +495,10 @@ class ACPAgentSession {
     expect(updatedIndex).toContain('import { registerAntigravityUsageSource } from "./server/usage.js"');
     expect(updatedIndex).toContain("registerAntigravityUsageSource(server)");
 
-    // Verify acp-agent.js persists this.currentTurnUsage
+    // Verify acp-agent.js persists this.currentTurnUsage and implements usageSession()
     const updatedAcp = fs.readFileSync(acpAgentPath, "utf-8");
     expect(updatedAcp).toContain("this.currentTurnUsage = { ...this.currentTurnUsage, ...usage };");
+    expect(updatedAcp).toContain("usageSession()");
 
     // After patching: isPaseoServerPatched must report true
     expect(isPaseoServerPatched(tempDir)).toBe(true);

@@ -728,35 +728,70 @@ export async function fetchAntigravityUsage() {
 
         for (const rawLine of lines) {
             const line = rawLine.trim();
-            if (!line) continue;
+            if (!line || line.toLowerCase().startsWith("quota:")) continue;
 
-            if (line.endsWith(":") && !line.includes("%")) {
-                currentModel = line.slice(0, -1).trim();
-                continue;
-            }
+            let scope = currentModel;
+            let limitType = "";
+            let remainingPct = null;
+            let resetsAt = null;
 
-            const isGemini = /gemini/i.test(currentModel) || !/claude/i.test(currentModel);
-            const match = line.match(/^([A-Za-z0-9\\s_-]+):\\s*(\\d+)%\\s*(?:used)?(?:\\s*\\((?:resets?\\s+in\\s+)?([^)]+)\\))?/i);
-            if (match) {
-                const limitType = match[1].trim();
-                const usedPct = parseInt(match[2], 10);
-                const resetStr = match[3] ? match[3].trim() : null;
-
-                let resetsAt = null;
-                if (resetStr) {
-                    const durMatch = resetStr.match(/(?:(\\d+)h)?\\s*(?:(\\d+)m)?/i);
-                    if (durMatch && (durMatch[1] || durMatch[2])) {
-                        const h = parseInt(durMatch[1] || "0", 10);
-                        const m = parseInt(durMatch[2] || "0", 10);
-                        resetsAt = new Date(Date.now() + (h * 3600 + m * 60) * 1000).toISOString();
-                    } else {
-                        const parsed = Date.parse(resetStr);
-                        if (!isNaN(parsed)) resetsAt = new Date(parsed).toISOString();
+            // Format 1: Table format e.g. "Gemini Models   Weekly Limit Remaining   56%   2026-10-14 04:37 UTC"
+            const m = line.match(/^(.*?)\\s{2,}(.*?Remaining)\\s+(\\d+)%(?:\\s+(.*))?$/i);
+            if (m) {
+                scope = m[1].trim();
+                limitType = m[2].trim();
+                remainingPct = parseInt(m[3], 10);
+                if (m[4]) {
+                    try {
+                        const d = new Date(m[4].trim());
+                        resetsAt = isNaN(d.getTime()) ? null : d.toISOString();
+                    } catch {}
+                }
+            } else {
+                // Format 2: Tab / multi-space separated
+                const parts = line.split(/\\t+|\\s{2,}/).map(p => p.trim());
+                if (parts.length >= 3 && parts[1]?.toLowerCase().includes("remaining")) {
+                    scope = parts[0];
+                    limitType = parts[1];
+                    const remMatch = parts[2].match(/(\\d+)%/);
+                    if (remMatch) remainingPct = parseInt(remMatch[1], 10);
+                    if (parts[3]) {
+                        try {
+                            const d = new Date(parts[3]);
+                            resetsAt = isNaN(d.getTime()) ? null : d.toISOString();
+                        } catch {}
+                    }
+                } else if (line.endsWith(":") && !line.includes("%")) {
+                    currentModel = line.slice(0, -1).trim();
+                    continue;
+                } else {
+                    // Format 3: Colon format e.g. "Session: 20% used (resets in 2h)"
+                    const colonMatch = line.match(/^([A-Za-z0-9\\s_-]+):\\s*(\\d+)%\\s*(?:used)?(?:\\s*\\((?:resets?\\s+in\\s+)?([^)]+)\\))?/i);
+                    if (colonMatch) {
+                        limitType = colonMatch[1].trim();
+                        const usedVal = parseInt(colonMatch[2], 10);
+                        remainingPct = Math.max(0, 100 - usedVal);
+                        const resetStr = colonMatch[3] ? colonMatch[3].trim() : null;
+                        if (resetStr) {
+                            const durMatch = resetStr.match(/(?:(\\d+)h)?\\s*(?:(\\d+)m)?/i);
+                            if (durMatch && (durMatch[1] || durMatch[2])) {
+                                const h = parseInt(durMatch[1] || "0", 10);
+                                const m = parseInt(durMatch[2] || "0", 10);
+                                resetsAt = new Date(Date.now() + (h * 3600 + m * 60) * 1000).toISOString();
+                            } else {
+                                const parsed = Date.parse(resetStr);
+                                if (!isNaN(parsed)) resetsAt = new Date(parsed).toISOString();
+                            }
+                        }
                     }
                 }
+            }
 
-                const isFiveHour = /session|5-?hour|5h/i.test(limitType);
+            if (remainingPct !== null && !isNaN(remainingPct)) {
+                const usedPct = Math.max(0, Math.min(100, 100 - remainingPct));
+                const isFiveHour = /session|five\\s*hour|5-?hour|5h/i.test(limitType);
                 const isWeekly = /week|7-?day/i.test(limitType);
+                const isGemini = /gemini/i.test(scope) || !/claude/i.test(scope);
 
                 let id = isFiveHour ? "session" : isWeekly ? "weekly" : "quota";
                 let label = isFiveHour ? "Session" : isWeekly ? "Weekly" : limitType.replace(/\\s+Remaining$/i, "");
@@ -771,7 +806,7 @@ export async function fetchAntigravityUsage() {
                     shortLabel: isFiveHour ? "5h" : isWeekly ? "wk" : "",
                     summary: true,
                     usedPct,
-                    remainingPct: Math.max(0, 100 - usedPct),
+                    remainingPct,
                     resetsAt,
                     tone: toneFromUsedPct(usedPct),
                     isFiveHour,
@@ -838,7 +873,7 @@ export function registerAntigravityUsageSource(server) {
             icon: "icon.svg",
             input: z.object({}).passthrough(),
             discover: async (scope) => {
-                if (scope && scope.kind === "session" && scope.provider && scope.provider !== "antigravity") {
+                if (scope && scope.kind === "session" && scope.provider && scope.provider !== "antigravity" && scope.provider !== "acp") {
                     return [];
                 }
                 return [{ key: "default", label: "Antigravity", input: {} }];
@@ -919,24 +954,20 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
           }
 
           // Inject registration call into contribute function
-          const contributeMatch = indexCode.match(/(export\s+default\s+function\s+contribute\s*\([^)]*\)\s*\{)([\s\S]*?)(\})/);
-          if (contributeMatch) {
-            const before = contributeMatch[1];
-            const body = contributeMatch[2];
-            const after = contributeMatch[3];
-            if (!body.includes("registerAntigravityUsageSource")) {
-              const patchedBody = body.replace(
-                /return\s+\(\)\s*=>\s*\{[^}]*\};?/,
-                (m) => `server.registerUsageSource ? registerAntigravityUsageSource(server) : null;\n  ${m}`
+          if (!indexCode.includes("registerAntigravityUsageSource(server)")) {
+            if (/return\s*\(\)\s*=>/.test(indexCode)) {
+              indexCode = indexCode.replace(
+                /return\s*\(\)\s*=>/,
+                "server.registerUsageSource ? registerAntigravityUsageSource(server) : null;\n  return () =>"
               );
-              if (patchedBody !== body) {
-                indexCode = indexCode.replace(contributeMatch[0], `${before}${patchedBody}${after}`);
-                indexModified = true;
-              } else {
-                indexCode = indexCode.replace(
-                  contributeMatch[0],
-                  `${before}${body}\n  server.registerUsageSource ? registerAntigravityUsageSource(server) : null;\n${after}`
-                );
+              indexModified = true;
+            } else {
+              const lastBraceIndex = indexCode.lastIndexOf("}");
+              if (lastBraceIndex !== -1) {
+                indexCode =
+                  indexCode.slice(0, lastBraceIndex) +
+                  "  server.registerUsageSource ? registerAntigravityUsageSource(server) : null;\n" +
+                  indexCode.slice(lastBraceIndex);
                 indexModified = true;
               }
             }
@@ -1128,9 +1159,111 @@ ${indent}}`;
         }
       }
 
+      // Patch usageSession() in ACPAgentSession for Paseo 0.11+ usage reporting
+      if (!acpCode.includes("usageSession()")) {
+        const constructorEndMatch = acpCode.match(/(?:^|\n)([ \t]*)this\.extensionCommandsParser\s*=[^;\n]*;[ \t]*\r?\n([ \t]*)\}/);
+        if (constructorEndMatch && constructorEndMatch.index !== undefined) {
+          const indent = constructorEndMatch[1] || "        ";
+          const braceIndent = constructorEndMatch[2] || "    ";
+          const usageSnippet = `this.usageSessionKey = typeof randomUUID === "function" ? randomUUID() : Math.random().toString(36).slice(2);
+${braceIndent}}
+${braceIndent}usageSession() {
+${braceIndent}    if (this.closed)
+${braceIndent}        return null;
+${braceIndent}    if (!this.usageSessionKey) {
+${braceIndent}        this.usageSessionKey = typeof randomUUID === "function" ? randomUUID() : Math.random().toString(36).slice(2);
+${braceIndent}    }
+${braceIndent}    return {
+${braceIndent}        provider: this.provider,
+${braceIndent}        model: this.currentModel ?? this.config?.model,
+${braceIndent}        env: (this.launchEnv && typeof this.launchEnv === "object") ? this.launchEnv : {},
+${braceIndent}        sessionKey: this.usageSessionKey,
+${braceIndent}    };
+${braceIndent}}`;
+          acpCode = acpCode.replace(
+            /(?:^|\n)([ \t]*)this\.extensionCommandsParser\s*=[^;\n]*;[ \t]*\r?\n([ \t]*)\}/,
+            (match, ind1) => `\n${ind1}this.extensionCommandsParser = options.extensionCommandsParser;\n${ind1}${usageSnippet}`
+          );
+          acpModified = true;
+        } else {
+          const sessionClassMatch = acpCode.match(/(?:export\s+)?class\s+ACPAgentSession\b[^{]*\{/);
+          if (sessionClassMatch && sessionClassMatch.index !== undefined) {
+            const insertPos = sessionClassMatch.index + sessionClassMatch[0].length;
+            const usageSnippet = `\n    usageSession() {
+        if (this.closed)
+            return null;
+        if (!this.usageSessionKey) {
+            this.usageSessionKey = typeof randomUUID === "function" ? randomUUID() : Math.random().toString(36).slice(2);
+        }
+        return {
+            provider: this.provider,
+            model: this.currentModel ?? this.config?.model,
+            env: (this.launchEnv && typeof this.launchEnv === "object") ? this.launchEnv : {},
+            sessionKey: this.usageSessionKey,
+        };
+    }`;
+            acpCode = acpCode.slice(0, insertPos) + usageSnippet + acpCode.slice(insertPos);
+            acpModified = true;
+          }
+        }
+      }
+
       if (acpModified) {
         fs.writeFileSync(acpFile, acpCode, "utf-8");
         changes.push(`Patched ${acpFile} for context-window token telemetry and usage updates`);
+      }
+    }
+
+    // 4. Locate and patch plugin-provider.js (if present) for Paseo 0.11+
+    const pluginProviderCandidates = [
+      path.join(serverDir, "dist", "server", "server", "agent", "plugin-provider.js"),
+      path.join(serverDir, "dist", "server", "agent", "plugin-provider.js"),
+      path.join(serverDir, "dist", "agent", "plugin-provider.js"),
+    ];
+    let pluginProviderFile = pluginProviderCandidates.find((f) => fs.existsSync(f));
+    if (!pluginProviderFile && fs.existsSync(path.join(serverDir, "dist"))) {
+      const findPluginProvider = (dir: string, depth = 0): string | null => {
+        if (depth > 5) return null;
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isDirectory() && e.name !== "node_modules") {
+              const found = findPluginProvider(full, depth + 1);
+              if (found) return found;
+            } else if (e.isFile() && e.name === "plugin-provider.js") {
+              return full;
+            }
+          }
+        } catch {}
+        return null;
+      };
+      pluginProviderFile = findPluginProvider(path.join(serverDir, "dist")) || undefined;
+    }
+
+    if (pluginProviderFile) {
+      let ppCode = fs.readFileSync(pluginProviderFile, "utf-8");
+      if (!ppCode.includes("usageSession()")) {
+        const ppClassMatch = ppCode.match(/(?:export\s+)?class\s+PluginAgentSession\b[^{]*\{/);
+        if (ppClassMatch && ppClassMatch.index !== undefined) {
+          const insertPos = ppClassMatch.index + ppClassMatch[0].length;
+          const ppUsage = `\n    usageSession() {
+        if (this.closed)
+            return null;
+        if (!this.usageSessionKey) {
+            this.usageSessionKey = typeof randomUUID === "function" ? randomUUID() : Math.random().toString(36).slice(2);
+        }
+        return {
+            provider: this.provider,
+            model: this.bridge?.config?.model,
+            env: (this.bridge?.launch?.env && typeof this.bridge?.launch?.env === "object") ? this.bridge.launch.env : {},
+            sessionKey: this.usageSessionKey,
+        };
+    }`;
+          ppCode = ppCode.slice(0, insertPos) + ppUsage + ppCode.slice(insertPos);
+          fs.writeFileSync(pluginProviderFile, ppCode, "utf-8");
+          changes.push(`Patched ${pluginProviderFile} with usageSession for plugin provider sessions`);
+        }
       }
     }
 
@@ -1566,6 +1699,9 @@ export function isPaseoServerPatched(serverDir: string): boolean {
     if (acpFile) {
       const content = fs.readFileSync(acpFile, "utf-8");
       if (!content.includes("this.currentTurnUsage =") || !content.includes("contextWindowMaxTokens")) {
+        return false;
+      }
+      if (pluginDir && !content.includes("usageSession()")) {
         return false;
       }
     }
