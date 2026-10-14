@@ -45,7 +45,7 @@ describe("ACP Handshake & Protocol", () => {
     throw new Error(`Timeout waiting for RPC response id=${id}`);
   }
 
-  it("advertises resume without falsely advertising loadSession replay", async () => {
+  it("advertises loadSession replay and session resume/list capabilities", async () => {
     sendRpc({
       jsonrpc: "2.0",
       id: 1,
@@ -61,8 +61,9 @@ describe("ACP Handshake & Protocol", () => {
     expect(response.result.serverInfo.name).toBe("agy-acp");
     expect(response.result.serverInfo.version).toMatch(/^\d+\.\d+\.\d+/);
     expect(response.result.protocolVersion).toBe(1);
-    expect(response.result.agentCapabilities.loadSession).toBe(false);
+    expect(response.result.agentCapabilities.loadSession).toBe(true);
     expect(response.result.agentCapabilities.sessionCapabilities.resume).toBeDefined();
+    expect(response.result.agentCapabilities.sessionCapabilities.list).toBeDefined();
   });
 
   it("returns session state and command metadata from session/new", async () => {

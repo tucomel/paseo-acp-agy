@@ -1,8 +1,9 @@
 import crypto from "node:crypto";
+import path from "node:path";
 import { AntigravityProcess } from "./antigravity-process.js";
 import { logger } from "./logger.js";
 import { resolvePermissionSettings } from "./permissions.js";
-import { calculateUsageCostUsd, getModelContextWindow } from "./protocol.js";
+import { calculateUsageCostUsd, getModelContextWindow, SessionInfo } from "./protocol.js";
 import {
   PersistedSessionState,
   SessionStore,
@@ -13,6 +14,7 @@ import {
 export interface SessionOptions {
   id?: string;
   cwd?: string;
+  title?: string;
   model?: string;
   effort?: string;
   mode?: string;
@@ -29,6 +31,7 @@ export interface SessionOptions {
 export class Session {
   public readonly id: string;
   public cwd: string;
+  public title?: string;
   public model: string;
   public effort: string;
   public mode: string;
@@ -44,6 +47,7 @@ export class Session {
   constructor(options: SessionOptions = {}) {
     this.id = options.id || crypto.randomUUID();
     this.cwd = options.cwd || process.cwd();
+    this.title = options.title;
     this.model = options.model || "gemini-3.7-flash";
     this.effort = options.effort || "high";
     this.mode = options.mode || "default";
@@ -92,6 +96,7 @@ export class Session {
 
     this.process.on("init", () => this.persist());
     this.process.on("result", () => this.persist());
+    this.process.on("conversation_healed", () => this.persist());
     this.persist();
   }
 
@@ -100,6 +105,7 @@ export class Session {
       sessionId: this.id,
       conversationId: this.process.currentConversationId,
       cwd: this.cwd,
+      title: this.title,
       model: this.model,
       effort: this.effort,
       mode: this.mode,
@@ -107,6 +113,13 @@ export class Session {
       usage: this.usage,
       updatedAt: new Date().toISOString(),
     };
+  }
+
+  setTitle(title: string): void {
+    if (this.title !== title) {
+      this.title = title;
+      this.persist();
+    }
   }
 
   persist() {
@@ -280,6 +293,7 @@ export class SessionManager {
       id: options.id,
       binaryPath: options.binaryPath || this.defaultBinaryPath,
       cwd: options.cwd || persisted?.cwd,
+      title: options.title || persisted?.title,
       model: options.model || persisted?.model,
       effort: options.effort || persisted?.effort,
       mode: options.mode || persisted?.mode,
@@ -325,7 +339,43 @@ export class SessionManager {
     this.sessions.clear();
   }
 
-  listSessions(): Session[] {
+  listActiveSessions(): Session[] {
     return Array.from(this.sessions.values());
+  }
+
+  listSessions(cwd?: string): SessionInfo[] {
+    const persisted = this.store.list(cwd);
+    const sessionMap = new Map<string, SessionInfo>();
+
+    for (const p of persisted) {
+      sessionMap.set(p.sessionId, {
+        sessionId: p.sessionId,
+        cwd: p.cwd,
+        title: p.title || (p.cwd ? path.basename(p.cwd) : "Antigravity Session"),
+        updatedAt: p.updatedAt,
+      });
+    }
+
+    for (const active of this.sessions.values()) {
+      if (cwd) {
+        const targetCwd = path.resolve(cwd).toLowerCase();
+        const activeCwd = path.resolve(active.cwd).toLowerCase();
+        if (targetCwd !== activeCwd) continue;
+      }
+      sessionMap.set(active.id, {
+        sessionId: active.id,
+        cwd: active.cwd,
+        title: active.title || (active.cwd ? path.basename(active.cwd) : "Antigravity Session"),
+        updatedAt: active.lastActivity.toISOString(),
+      });
+    }
+
+    const list = Array.from(sessionMap.values());
+    list.sort((a, b) => {
+      const timeA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+      const timeB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+      return timeB - timeA;
+    });
+    return list;
   }
 }

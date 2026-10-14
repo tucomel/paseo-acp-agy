@@ -1,5 +1,6 @@
 import readline from "node:readline";
 import { Readable, Writable } from "node:stream";
+import { EventEmitter } from "node:events";
 import { logger } from "./logger.js";
 import {
   JsonRpcNotification,
@@ -27,6 +28,7 @@ import { SessionManager, Session } from "./session.js";
 import { executeSlashCommand, AVAILABLE_SLASH_COMMANDS } from "./slash-commands.js";
 import { getShortVersion } from "./version.js";
 import { resolveDefaultAgyBinary } from "./antigravity-process.js";
+import { loadConversationTranscript } from "./transcript.js";
 
 function splitModelAndEffort(modelInput?: string): { model?: string; effort?: string } {
   if (!modelInput) return {};
@@ -39,7 +41,7 @@ function splitModelAndEffort(modelInput?: string): { model?: string; effort?: st
   return { model: modelInput };
 }
 
-export class ACPServer {
+export class ACPServer extends EventEmitter {
   private sessionManager: SessionManager;
   private input: Readable;
   private output: Writable;
@@ -55,6 +57,7 @@ export class ACPServer {
     binaryPath?: string;
     skipNarration?: boolean;
   } = {}) {
+    super();
     this.input = options.input || process.stdin;
     this.output = options.output || process.stdout;
     this.binaryPath = options.binaryPath || resolveDefaultAgyBinary();
@@ -67,6 +70,15 @@ export class ACPServer {
   start() {
     if (this.isRunning) return;
     this.isRunning = true;
+
+    this.output.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") {
+        logger.debug("ACP output stream closed", { code: err.code });
+      } else {
+        logger.error("ACP output stream error", { error: err.message, code: err.code });
+      }
+    });
+
     this.rl = readline.createInterface({
       input: this.input,
       output: undefined,
@@ -79,15 +91,23 @@ export class ACPServer {
     });
     this.rl.on("close", () => {
       logger.info("ACP input stream closed, shutting down server");
-      this.stop().catch((err) => {
-        logger.error("Error stopping ACP server on close", { error: (err as Error).message });
-      });
+      this.stop()
+        .catch((err) => {
+          logger.error("Error stopping ACP server on close", { error: (err as Error).message });
+        })
+        .finally(() => {
+          this.emit("close");
+        });
     });
     logger.info("ACP Server started");
   }
 
   private send(msg: unknown) {
-    this.output.write(JSON.stringify(msg) + "\n");
+    try {
+      this.output.write(JSON.stringify(msg) + "\n");
+    } catch (err) {
+      logger.warn("Failed to write to ACP output stream", { error: (err as Error).message });
+    }
   }
 
   private sendNotification(method: string, params: unknown) {
@@ -242,8 +262,12 @@ export class ACPServer {
               agentInfo: { name: "agy-acp", version: shortVersion },
               serverInfo: { name: "agy-acp", version: shortVersion },
               agentCapabilities: {
-                loadSession: false,
-                sessionCapabilities: { resume: {} },
+                loadSession: true,
+                sessionCapabilities: {
+                  resume: {},
+                  list: {},
+                  fork: {},
+                },
               },
             });
           }
@@ -293,7 +317,6 @@ export class ACPServer {
           }
 
           let session = this.sessionManager.getSession(sessionId);
-          let created = false;
           try {
             if (!session) {
               session = this.sessionManager.createSession({
@@ -301,10 +324,79 @@ export class ACPServer {
                 cwd,
                 binaryPath: this.binaryPath,
               });
-              created = true;
             }
-            if (!created && session.process.currentConversationId) {
-              await session.ensureReadyForResume();
+
+            const conversationId = session.process.currentConversationId;
+            if (conversationId) {
+              try {
+                const replayItems = await loadConversationTranscript(conversationId);
+                if (!session.title && replayItems.length > 0) {
+                  const firstUser = replayItems.find((item) => item.type === "user_message");
+                  if (firstUser && firstUser.text) {
+                    session.setTitle(firstUser.text.slice(0, 80).replace(/\r?\n/g, " ").trim());
+                  }
+                }
+                for (const item of replayItems) {
+                  switch (item.type) {
+                    case "user_message":
+                      this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                        sessionId: session.id,
+                        update: {
+                          sessionUpdate: "user_message_chunk",
+                          content: { type: "text", text: item.text },
+                        },
+                      });
+                      break;
+                    case "agent_thought":
+                      this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                        sessionId: session.id,
+                        update: {
+                          sessionUpdate: "agent_thought_chunk",
+                          content: { type: "text", text: item.text },
+                        },
+                      });
+                      break;
+                    case "tool_call":
+                      this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                        sessionId: session.id,
+                        update: {
+                          sessionUpdate: "tool_call",
+                          toolCallId: item.toolCallId,
+                          title: item.title,
+                          kind: item.kind,
+                          rawInput: item.rawInput,
+                        },
+                      });
+                      break;
+                    case "tool_call_update":
+                      this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                        sessionId: session.id,
+                        update: {
+                          sessionUpdate: "tool_call_update",
+                          toolCallId: item.toolCallId,
+                          status: item.status,
+                          rawOutput: item.rawOutput,
+                        },
+                      });
+                      break;
+                    case "agent_message":
+                      this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                        sessionId: session.id,
+                        update: {
+                          sessionUpdate: "agent_message_chunk",
+                          content: { type: "text", text: item.text },
+                        },
+                      });
+                      break;
+                  }
+                }
+              } catch (replayErr) {
+                logger.warn("Failed to replay conversation transcript during session load", {
+                  sessionId,
+                  conversationId,
+                  error: (replayErr as Error).message,
+                });
+              }
             }
 
             if (!isNotification) {
@@ -374,6 +466,42 @@ export class ACPServer {
           break;
         }
 
+        case ACP_METHODS.SESSION_LIST:
+        case ACP_METHODS.SESSION_LIST_CAMEL:
+        case ACP_METHODS.SESSION_LIST_ALIAS: {
+          const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
+          const sessions = this.sessionManager.listSessions(cwd);
+          if (!isNotification) {
+            this.sendSuccess(id, { sessions });
+          }
+          break;
+        }
+
+        case ACP_METHODS.SESSION_FORK:
+        case ACP_METHODS.SESSION_FORK_ALIAS: {
+          const sourceSessionId = String(params.sessionId || "");
+          const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
+          const sourceSession = sourceSessionId ? this.sessionManager.getSession(sourceSessionId) : undefined;
+          const newSession = this.sessionManager.createSession({
+            cwd: cwd || sourceSession?.cwd,
+            model: sourceSession?.model,
+            effort: sourceSession?.effort,
+            mode: sourceSession?.mode,
+            permission: sourceSession?.permission,
+            conversationId: sourceSession?.process.currentConversationId,
+            binaryPath: this.binaryPath,
+          });
+          if (sourceSession?.title) {
+            newSession.setTitle(`${sourceSession.title} (fork)`);
+          }
+          if (!isNotification) {
+            this.sendSuccess(id, await this.sessionState(newSession));
+            this.publishCommands(newSession.id);
+            this.publishUsageUpdate(newSession);
+          }
+          break;
+        }
+
         case ACP_METHODS.SESSION_PROMPT:
         case ACP_METHODS.SESSION_PROMPT_ALIAS: {
           const sessionId = String(params.sessionId || "");
@@ -398,6 +526,9 @@ export class ACPServer {
           try {
             session.touch();
             const promptText = extractPromptText(params.prompt);
+            if (!session.title && promptText) {
+              session.setTitle(promptText.slice(0, 80).replace(/\r?\n/g, " ").trim());
+            }
             logger.info("Processing ACP prompt", {
               sessionId,
               promptLength: promptText.length,
@@ -523,29 +654,37 @@ export class ACPServer {
                   cachedReadTokens
                 );
                 const thoughtTokens = step.usage.thinking_tokens;
-                const totalTokens = step.usage.total_tokens ?? (inputTokens + outputTokens);
                 const totalCostUsd = roundUsageCostUsd(session.usage.totalCostUsd + turnCost);
                 const contextWindowMaxTokens = getModelContextWindow(executingModel);
-                const contextWindowUsedTokens = Math.min(
+                const stepContextUsed = Math.min(
                   latestStepContextTokens ?? (inputTokens + cachedReadTokens + outputTokens),
                   contextWindowMaxTokens
                 );
+                session.usage.contextWindowUsedTokens = stepContextUsed;
+
+                const cumulativeInputTokens = session.usage.inputTokens + inputTokens;
+                const cumulativeOutputTokens = session.usage.outputTokens + outputTokens;
+                const cumulativeCachedTokens = session.usage.cachedInputTokens + cachedReadTokens;
+                const cumulativeTotalTokens = cumulativeInputTokens + cumulativeOutputTokens;
 
                 this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                   sessionId: session.id,
                   update: {
                     sessionUpdate: "usage_update",
                     size: contextWindowMaxTokens,
-                    used: contextWindowUsedTokens,
+                    used: stepContextUsed,
                     cost: { amount: totalCostUsd, currency: "USD" },
-                    inputTokens,
-                    outputTokens,
-                    cachedReadTokens,
+                    inputTokens: cumulativeInputTokens,
+                    outputTokens: cumulativeOutputTokens,
+                    cachedReadTokens: cumulativeCachedTokens,
+                    cachedInputTokens: cumulativeCachedTokens,
                     ...(thoughtTokens !== undefined ? { thoughtTokens } : {}),
-                    totalTokens,
+                    totalTokens: cumulativeTotalTokens,
                     totalCostUsd,
                     contextWindowMaxTokens,
-                    contextWindowUsedTokens,
+                    contextWindowUsedTokens: stepContextUsed,
+                    stepInputTokens: inputTokens,
+                    stepOutputTokens: outputTokens,
                   },
                 });
               }

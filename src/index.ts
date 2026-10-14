@@ -288,6 +288,21 @@ const skipNarration =
   args.includes("--skip-narration") ||
   process.env.AGY_ACP_SKIP_NARRATION === "true";
 
+process.on("uncaughtException", (err) => {
+  if ((err as NodeJS.ErrnoException).code === "EPIPE") {
+    logger.debug("Suppressed EPIPE in uncaughtException");
+    return;
+  }
+  logger.error("Uncaught exception in agy-acp process", { error: err.message, stack: err.stack });
+});
+
+process.on("unhandledRejection", (reason) => {
+  logger.error("Unhandled rejection in agy-acp process", {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+});
+
 const server = new ACPServer({ skipNarration });
 
 const cleanup = async () => {
@@ -303,4 +318,9 @@ const cleanup = async () => {
 process.on("SIGINT", cleanup);
 process.on("SIGTERM", cleanup);
 
+server.on("close", () => {
+  process.exit(0);
+});
+
 server.start();
+

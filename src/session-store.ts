@@ -18,6 +18,7 @@ export interface PersistedSessionState {
   sessionId: string;
   conversationId?: string;
   cwd: string;
+  title?: string;
   model: string;
   effort: string;
   mode: string;
@@ -52,6 +53,10 @@ export class SessionStore {
         fs.chmodSync(this.dir, 0o700);
       }
     } catch {}
+  }
+
+  get storageDir(): string {
+    return this.dir;
   }
 
   private pathFor(sessionId: string): string {
@@ -104,6 +109,61 @@ export class SessionStore {
         error: (err as Error).message,
       });
     }
+  }
+
+  delete(sessionId: string): boolean {
+    const filePath = this.pathFor(sessionId);
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      logger.warn("Failed to delete persisted ACP session", {
+        sessionId,
+        error: (err as Error).message,
+      });
+      return false;
+    }
+  }
+
+  list(cwd?: string): PersistedSessionState[] {
+    if (!fs.existsSync(this.dir)) return [];
+    const results: PersistedSessionState[] = [];
+    const normalizedTargetCwd = cwd ? path.resolve(cwd).toLowerCase() : undefined;
+
+    try {
+      const files = fs.readdirSync(this.dir);
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        const fullPath = path.join(this.dir, file);
+        try {
+          const content = fs.readFileSync(fullPath, "utf8");
+          const parsed = JSON.parse(content) as PersistedSessionState;
+          if (!parsed.sessionId) continue;
+
+          if (normalizedTargetCwd && parsed.cwd) {
+            const sessionCwd = path.resolve(parsed.cwd).toLowerCase();
+            if (sessionCwd !== normalizedTargetCwd) continue;
+          }
+          results.push(parsed);
+        } catch {
+          // ignore corrupted individual files
+        }
+      }
+
+      // Sort by updatedAt descending
+      results.sort((a, b) => {
+        const timeA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+        const timeB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+        return timeB - timeA;
+      });
+    } catch (err) {
+      logger.warn("Failed to list persisted ACP sessions", { error: (err as Error).message });
+    }
+
+    return results;
   }
 }
 

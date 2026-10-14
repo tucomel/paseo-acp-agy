@@ -130,6 +130,11 @@ export const ACP_METHODS = {
   SESSION_LOAD_ALIAS: "loadSession",
   SESSION_RESUME: "session/resume",
   SESSION_RESUME_ALIAS: "unstable_resumeSession",
+  SESSION_LIST: "session/list",
+  SESSION_LIST_CAMEL: "session/listSessions",
+  SESSION_LIST_ALIAS: "sessionList",
+  SESSION_FORK: "session/fork",
+  SESSION_FORK_ALIAS: "forkSession",
   SESSION_PROMPT: "session/prompt",
   SESSION_PROMPT_ALIAS: "prompt",
   SESSION_CANCEL: "session/cancel",
@@ -147,6 +152,14 @@ export const ACP_METHODS = {
   SESSION_SET_CONFIG_OPTION_ALIAS: "setSessionConfigOption",
   SESSION_UPDATE: "session/update",
 } as const;
+
+export interface SessionInfo {
+  sessionId: string;
+  cwd: string;
+  title?: string | null;
+  updatedAt?: string | null;
+  _meta?: Record<string, unknown> | null;
+}
 
 export type ToolKind = "read" | "edit" | "execute" | "fetch" | "other";
 
@@ -272,6 +285,8 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "gemini-3.7-flash": { inputCostPerM: 0.10, outputCostPerM: 0.40, cachedInputCostPerM: 0.025 },
   "gemini-3.6-flash": { inputCostPerM: 0.10, outputCostPerM: 0.40, cachedInputCostPerM: 0.025 },
   "gemini-3.1-pro": { inputCostPerM: 1.25, outputCostPerM: 5.00, cachedInputCostPerM: 0.3125 },
+  "claude-opus-5-5": { inputCostPerM: 15.00, outputCostPerM: 75.00, cachedInputCostPerM: 1.50 },
+  "claude-sonnet-5-5": { inputCostPerM: 3.00, outputCostPerM: 15.00, cachedInputCostPerM: 0.30 },
   "claude-sonnet-4-6": { inputCostPerM: 3.00, outputCostPerM: 15.00, cachedInputCostPerM: 0.30 },
   "claude-opus-4-6-thinking": { inputCostPerM: 15.00, outputCostPerM: 75.00, cachedInputCostPerM: 1.50 },
   "gpt-oss-120b": { inputCostPerM: 0.15, outputCostPerM: 0.60, cachedInputCostPerM: 0.0375 },
@@ -282,6 +297,8 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "gemini-3.7-flash": 1_048_576,
   "gemini-3.6-flash": 1_048_576,
   "gemini-3.1-pro": 2_097_152,
+  "claude-opus-5-5": 200_000,
+  "claude-sonnet-5-5": 200_000,
   "claude-sonnet-4-6": 200_000,
   "claude-opus-4-6-thinking": 200_000,
   "gpt-oss-120b": 128_000,
@@ -577,6 +594,8 @@ export const FALLBACK_MODELS: ModelDefinition[] = [
   { modelId: "gemini-3.7-flash", name: "Gemini 3.7 Flash", description: "Google Gemini 3.7 Flash", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },
   { modelId: "gemini-3.6-flash", name: "Gemini 3.6 Flash", description: "Google Gemini 3.6 Flash", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },
   { modelId: "gemini-3.1-pro", name: "Gemini 3.1 Pro", description: "Google Gemini 3.1 Pro", supportedEfforts: ["high", "low"], contextWindowMaxTokens: 2_097_152 },
+  { modelId: "claude-opus-5-5", name: "Claude Opus 5.5 (Thinking)", description: "Anthropic Claude Opus 5.5 (Thinking)", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 200_000 },
+  { modelId: "claude-sonnet-5-5", name: "Claude Sonnet 5.5 (Thinking)", description: "Anthropic Claude Sonnet 5.5 (Thinking)", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 200_000 },
   { modelId: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Thinking)", description: "Anthropic Claude Sonnet 4.6 (Thinking)", supportedEfforts: [], contextWindowMaxTokens: 200_000 },
   { modelId: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", description: "Anthropic Claude Opus 4.6 (Thinking)", supportedEfforts: [], contextWindowMaxTokens: 200_000 },
   { modelId: "gpt-oss-120b", name: "GPT-OSS 120B", description: "GPT-OSS 120B (Medium)", supportedEfforts: ["medium"], contextWindowMaxTokens: 128_000 },
@@ -591,8 +610,12 @@ const MODEL_CACHE_TTL_MS = 60_000;
 export function parseAgyModelsOutput(rawOutput: string): ModelDefinition[] {
   const modelsMap = new Map<string, ModelDefinition>();
   for (const line of rawOutput.split(/[\r\n]+/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.includes("Fetching available models")) continue;
+    const trimmed = line
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
+      .replace(/[\u2800-\u28ff]+/g, "")
+      .replace(/Fetching available models\.\.\./gi, "")
+      .trim();
+    if (!trimmed) continue;
     const parts = trimmed.split(/\t+|\s{2,}/).map((p) => p.trim()).filter(Boolean);
     if (parts.length < 2) continue;
     const modelId = parts[0];
@@ -646,10 +669,20 @@ export async function fetchAvailableModels(binaryPath: string = "agy", force = f
         windowsHide: true,
       });
       const parsed = parseAgyModelsOutput(stdout);
-      cachedModels = parsed;
+      const mergedMap = new Map<string, ModelDefinition>();
+      for (const m of parsed) {
+        mergedMap.set(m.modelId, m);
+      }
+      for (const fallback of FALLBACK_MODELS) {
+        if (!mergedMap.has(fallback.modelId)) {
+          mergedMap.set(fallback.modelId, fallback);
+        }
+      }
+      const merged = Array.from(mergedMap.values());
+      cachedModels = merged;
       cachedModelsBinaryPath = binaryPath;
       lastModelFetch = Date.now();
-      return parsed;
+      return merged;
     } catch (err) {
       logger.warn("Failed to fetch models from agy CLI, using fallback models", {
         error: (err as Error).message,

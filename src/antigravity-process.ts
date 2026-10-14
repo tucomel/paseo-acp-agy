@@ -449,6 +449,7 @@ export class AntigravityProcess extends EventEmitter {
     let stderrBuffer = "";
 
     child.stdout.on("data", (chunk: string) => {
+      this.emit("activity");
       stdoutBuffer += chunk;
       const lines = stdoutBuffer.split("\n");
       stdoutBuffer = lines.pop() || "";
@@ -504,6 +505,7 @@ export class AntigravityProcess extends EventEmitter {
         });
       } else if (this.child === child) {
         this.child = null;
+        this.initialInfo = null;
       }
       this.emit("exit", { code, signal, pid: child.pid });
     });
@@ -553,12 +555,44 @@ export class AntigravityProcess extends EventEmitter {
     }
   }
 
-  async ensureReady(expectedConversationId?: string, timeoutMs = 10_000): Promise<void> {
-    if (this.currentTurnPromise) {
-      throw new Error("Cannot validate an Antigravity session while a prompt turn is active");
+  async ensureReady(
+    expectedConversationId?: string,
+    timeoutMs = 15_000,
+    forTurn?: ActiveTurn,
+    allowAutoHeal = true
+  ): Promise<void> {
+    try {
+      await this.ensureReadyInternal(expectedConversationId, timeoutMs, forTurn);
+    } catch (err) {
+      if (allowAutoHeal && this.conversationId) {
+        logger.warn(
+          "Failed to start/resume agy process with conversation ID; auto-healing by clearing conversation ID and starting fresh",
+          { conversationId: this.conversationId, error: (err as Error).message }
+        );
+        const failedChild = this.child;
+        this.conversationId = undefined;
+        this.initialInfo = null;
+        if (failedChild) {
+          await this.terminateChild(failedChild).catch(() => {});
+        }
+        await this.ensureReadyInternal(undefined, timeoutMs, forTurn);
+        this.emit("conversation_healed", { previousConversationId: expectedConversationId });
+        return;
+      }
+      throw err;
+    }
+  }
+
+  private async ensureReadyInternal(
+    expectedConversationId?: string,
+    timeoutMs = 15_000,
+    forTurn?: ActiveTurn
+  ): Promise<void> {
+    if (this.currentTurnPromise && this.currentTurnPromise !== forTurn) {
+      throw new Error("Cannot validate an Antigravity session while another prompt turn is active");
     }
 
-    await this.applyPendingRestart();
+    await this.applyPendingRestart(forTurn);
     if (!this.isRunning) await this.start();
 
     const child = this.child;
@@ -666,50 +700,103 @@ export class AntigravityProcess extends EventEmitter {
     // turn while the child is still starting or restarting.
     this.currentTurnPromise = active;
     let stepListener: ((event: AgyStepUpdateEvent) => void) | null = null;
+    let activityListener: (() => void) | null = null;
+    let inactivityTimer: NodeJS.Timeout | null = null;
 
-    const failBeforeWrite = (err: Error) => {
-      if (stepListener) this.off("step_update", stepListener);
-      if (this.currentTurnPromise === active) this.currentTurnPromise = null;
-      active.reject(err);
+    const turnTimeoutMs =
+      Number(process.env.AGY_ACP_TURN_TIMEOUT_MS) > 0
+        ? Number(process.env.AGY_ACP_TURN_TIMEOUT_MS)
+        : 15 * 60 * 1000; // 15 minutes default turn inactivity timeout
+
+    const resetInactivityTimer = () => {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        logger.error("Turn timed out due to lack of activity from agy", {
+          timeoutMs: turnTimeoutMs,
+          conversationId: this.conversationId,
+        });
+        if (active.child) {
+          const childToKill = active.child;
+          this.signalProcessTree(childToKill, "SIGINT");
+          setTimeout(() => {
+            if (this.isProcessTreeAlive(childToKill)) {
+              this.signalProcessTree(childToKill, "SIGKILL");
+            }
+          }, 3000);
+        }
+        cleanupAndSettle(() =>
+          active.reject(new Error(`Turn timed out after ${turnTimeoutMs / 1000}s of inactivity`))
+        );
+      }, turnTimeoutMs);
+    };
+
+    const cleanupAndSettle = (settleFn: () => void) => {
+      if (inactivityTimer) {
+        clearTimeout(inactivityTimer);
+        inactivityTimer = null;
+      }
+      if (stepListener) {
+        this.off("step_update", stepListener);
+        stepListener = null;
+      }
+      if (activityListener) {
+        this.off("activity", activityListener);
+        activityListener = null;
+      }
+      if (this.currentTurnPromise === active) {
+        this.currentTurnPromise = null;
+      }
+      settleFn();
     };
 
     try {
       await this.applyPendingRestart(active);
       if (active.cancelled) {
-        failBeforeWrite(new Error("Prompt turn cancelled before execution"));
+        cleanupAndSettle(() => active.reject(new Error("Prompt turn cancelled before execution")));
         return turnPromise;
       }
 
-      if (!this.isRunning) await this.start();
+      // Synchronize readiness & auto-heal if conversation resume was broken
+      await this.ensureReady(this.conversationId, 15_000, active, true);
       if (active.cancelled) {
-        failBeforeWrite(new Error("Prompt turn cancelled before execution"));
+        cleanupAndSettle(() => active.reject(new Error("Prompt turn cancelled before execution")));
         return turnPromise;
       }
 
       const child = this.child;
       if (!child || !child.stdin || !child.stdin.writable) {
-        failBeforeWrite(new Error("Cannot send prompt: agy process stdin is not writable"));
+        cleanupAndSettle(() =>
+          active.reject(new Error("Cannot send prompt: agy process stdin is not writable"))
+        );
         return turnPromise;
       }
       active.child = child;
 
+      const origResolve = active.resolve;
+      const origReject = active.reject;
+      active.resolve = (result) => {
+        cleanupAndSettle(() => origResolve(result));
+      };
+      active.reject = (err) => {
+        cleanupAndSettle(() => origReject(err));
+      };
+
       if (onStepUpdate) {
-        stepListener = onStepUpdate;
+        stepListener = (event: AgyStepUpdateEvent) => {
+          resetInactivityTimer();
+          onStepUpdate(event);
+        };
         this.on("step_update", stepListener);
-        const originalResolve = active.resolve;
-        const originalReject = active.reject;
-        active.resolve = (result) => {
-          if (stepListener) this.off("step_update", stepListener);
-          originalResolve(result);
-        };
-        active.reject = (err) => {
-          if (stepListener) this.off("step_update", stepListener);
-          originalReject(err);
-        };
       }
 
+      activityListener = () => resetInactivityTimer();
+      this.on("activity", activityListener);
+
+      // Start initial inactivity timer
+      resetInactivityTimer();
+
       if (active.cancelled) {
-        failBeforeWrite(new Error("Prompt turn cancelled before execution"));
+        cleanupAndSettle(() => active.reject(new Error("Prompt turn cancelled before execution")));
         return turnPromise;
       }
 
@@ -720,7 +807,7 @@ export class AntigravityProcess extends EventEmitter {
       logger.debug("Writing prompt to agy stdin", { promptPreview: text.slice(0, 100) });
       child.stdin.write(JSON.stringify(payload) + "\n");
     } catch (err) {
-      failBeforeWrite(err as Error);
+      cleanupAndSettle(() => active.reject(err as Error));
     }
 
     return turnPromise;
@@ -732,7 +819,26 @@ export class AntigravityProcess extends EventEmitter {
 
     active.cancelled = true;
     logger.info("Cancelling active agy turn", { hasChild: Boolean(active.child) });
-    if (active.child) this.signalProcessTree(active.child, "SIGINT");
+    if (active.child) {
+      const child = active.child;
+      this.signalProcessTree(child, "SIGINT");
+      setTimeout(() => {
+        if (this.isProcessTreeAlive(child)) {
+          logger.warn("agy process did not exit after SIGINT cancellation; sending SIGTERM", {
+            pid: child.pid,
+          });
+          this.signalProcessTree(child, "SIGTERM");
+          setTimeout(() => {
+            if (this.isProcessTreeAlive(child)) {
+              logger.warn("agy process did not exit after SIGTERM; sending SIGKILL", {
+                pid: child.pid,
+              });
+              this.signalProcessTree(child, "SIGKILL");
+            }
+          }, 1500);
+        }
+      }, 3000);
+    }
     return true;
   }
 
