@@ -48,7 +48,7 @@ export class Session {
     this.id = options.id || crypto.randomUUID();
     this.cwd = options.cwd || process.cwd();
     this.title = options.title;
-    this.model = options.model || "gemini-3.7-flash";
+    this.model = options.model || "gemini-3.8-flash";
     this.effort = options.effort || "high";
     this.mode = options.mode || "default";
     this.permission =

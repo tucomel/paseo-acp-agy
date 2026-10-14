@@ -325,7 +325,7 @@ export function getModelPricing(modelId?: string): ModelPricing | null {
   if (lower.includes("opus")) return MODEL_PRICING["claude-opus-4-6-thinking"];
   if (lower.includes("claude") || lower.includes("sonnet")) return MODEL_PRICING["claude-sonnet-4-6"];
   if (lower.includes("pro")) return MODEL_PRICING["gemini-3.1-pro"];
-  if (lower.includes("flash")) return MODEL_PRICING["gemini-3.7-flash"];
+  if (lower.includes("flash")) return MODEL_PRICING["gemini-3.8-flash"];
   if (lower.includes("gpt-oss")) return MODEL_PRICING["gpt-oss-120b"];
 
   return null;
@@ -334,7 +334,7 @@ export function getModelPricing(modelId?: string): ModelPricing | null {
 // Keep costs at full JavaScript floating-point precision. Rounding happens
 // only when values are serialized for the UI so micro-costs accumulate.
 export function calculateUsageCostUsd(
-  modelId: string = "gemini-3.7-flash",
+  modelId: string = "gemini-3.8-flash",
   inputTokens: number = 0,
   outputTokens: number = 0,
   cachedInputTokens: number = 0

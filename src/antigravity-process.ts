@@ -539,15 +539,18 @@ export class AntigravityProcess extends EventEmitter {
         break;
       }
       case "result": {
-        if (!ownsTurn || !this.currentTurnPromise) break;
         const resultEvent = event as AgyResultEvent;
         if (resultEvent.result?.conversation_id) {
           this.conversationId = resultEvent.result.conversation_id;
         }
-        this.emit("result", resultEvent);
-        const active = this.currentTurnPromise;
-        this.currentTurnPromise = null;
-        active.resolve(resultEvent);
+        if (ownsProcess) {
+          this.emit("result", resultEvent);
+        }
+        if (ownsTurn && this.currentTurnPromise) {
+          const active = this.currentTurnPromise;
+          this.currentTurnPromise = null;
+          active.resolve(resultEvent);
+        }
         break;
       }
       default:
@@ -614,8 +617,10 @@ export class AntigravityProcess extends EventEmitter {
       let settled = false;
       const cleanup = () => {
         this.off("init", onInit);
+        this.off("result", onResult);
         child.off("error", onError);
         child.off("close", onClose);
+        child.off("exit", onExit);
         clearTimeout(timer);
       };
       const finishReject = (err: Error) => {
@@ -648,8 +653,16 @@ export class AntigravityProcess extends EventEmitter {
         }
         finishResolve();
       };
+      const onResult = (event: AgyResultEvent) => {
+        if (this.child !== child) return;
+        if (event.result?.status === "ERROR") {
+          finishReject(new Error(event.result.error || "Antigravity failed before initialization"));
+        }
+      };
       const onError = (err: Error) => finishReject(err);
       const onClose = (code: number | null, signal: NodeJS.Signals | null) =>
+        finishReject(new Error(`Antigravity exited before initialization: code=${code} signal=${signal}`));
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) =>
         finishReject(new Error(`Antigravity exited before initialization: code=${code} signal=${signal}`));
       const timer = setTimeout(() => {
         if (settled) return;
@@ -662,8 +675,10 @@ export class AntigravityProcess extends EventEmitter {
       }, timeoutMs);
 
       this.on("init", onInit);
+      this.on("result", onResult);
       child.once("error", onError);
       child.once("close", onClose);
+      child.once("exit", onExit);
 
       if (this.initialInfo !== null) {
         onInit({
