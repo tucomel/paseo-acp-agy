@@ -165,6 +165,29 @@ Claude and GPT models\tFive Hour Limit Remaining\t20%\t2026-09-03T06:21:47Z
       });
     });
 
+    it("parses Gemini 4 Argon quota output distinctly", () => {
+      const sampleWithArgon = `
+Quota:
+Gemini Models          Weekly Limit Remaining       98%   2026-10-24 14:55 UTC
+Gemini Models          Five Hour Limit Remaining    98%   2026-10-19 18:45 UTC
+Claude and GPT models  Weekly Limit Remaining       100%  2026-10-26 13:49 UTC
+Claude and GPT models  Five Hour Limit Remaining    100%  2026-10-19 18:49 UTC
+Gemini 4 Argon         Gemini 4 Argon Weekly Limit  95%   2026-10-24 16:27 UTC
+`;
+      const windows = parseAgyQuotaOutput(sampleWithArgon);
+      expect(windows).toHaveLength(5);
+      const argonWindow = windows.find((w) => w.id === "argon_weekly");
+      expect(argonWindow).toBeDefined();
+      expect(argonWindow).toMatchObject({
+        id: "argon_weekly",
+        label: "Gemini 4 Argon Weekly",
+        remainingPct: 95,
+        usedPct: 5,
+        resetsAt: "2026-10-24 16:27 UTC",
+        tone: "ok",
+      });
+    });
+
     it("parses credits output correctly", () => {
       expect(parseAgyCreditsOutput("Model credits\nRemaining credits  0\nUpgrade  https://...")).toEqual({
         id: "credits",

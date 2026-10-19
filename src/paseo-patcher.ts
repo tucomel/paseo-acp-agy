@@ -455,7 +455,7 @@ export class AntigravityQuotaProvider {
                 let remainingPct = null;
                 let resetsAt = null;
 
-                const m = trimmed.match(/^(.*?)\\s{2,}(.*?Remaining)\\s+(\\d+)%(?:\\s+(.*))?$/i);
+                const m = trimmed.match(/^(.*?)\\s{2,}(.*?)\\s+(\\d+)%(?:\\s+(.*))?$/i);
                 if (m) {
                     scope = m[1].trim();
                     limitType = m[2].trim();
@@ -488,13 +488,18 @@ export class AntigravityQuotaProvider {
 
                 if (remainingPct !== null && !isNaN(remainingPct)) {
                     const usedPct = Math.max(0, Math.min(100, 100 - remainingPct));
-                    const isFiveHour = /five\\s*hour/i.test(limitType);
-                    const isWeekly = /weekly/i.test(limitType);
-                    const isGemini = /gemini/i.test(scope);
+                    const isFiveHour = /session|five\\s*hour|5-?hour|5h/i.test(limitType);
+                    const isWeekly = /week|7-?day/i.test(limitType);
+                    const isArgon = /argon/i.test(scope) || /argon/i.test(limitType);
+                    const isClaude = /claude|gpt/i.test(scope);
+                    const isGemini = (/gemini/i.test(scope) || !isClaude) && !isArgon;
 
                     let id = isFiveHour ? "session" : isWeekly ? "weekly" : "quota";
                     let label = isFiveHour ? "Session" : isWeekly ? "Weekly" : limitType.replace(/\\s+Remaining$/i, "");
-                    if (!isGemini) {
+                    if (isArgon) {
+                        id = \`argon_\${id}\`;
+                        label = \`Gemini 4 Argon \${isFiveHour ? "Session" : isWeekly ? "Weekly" : limitType.replace(/\\s+Remaining$/i, "").replace(/^Gemini 4 Argon\\s+/i, "")}\`;
+                    } else if (!isGemini) {
                         id = \`claude_\${id}\`;
                         label = \`Claude \${label}\`;
                     }
@@ -507,16 +512,18 @@ export class AntigravityQuotaProvider {
                         tone: toneFromUsedPct(usedPct),
                         isFiveHour,
                         isGemini,
+                        isArgon,
                     });
                 }
             }
 
             rawWindows.sort((a, b) => {
-                if (a.isGemini && !b.isGemini) return -1;
-                if (!a.isGemini && b.isGemini) return 1;
-                if (a.isFiveHour && !b.isFiveHour) return -1;
-                if (!a.isFiveHour && b.isFiveHour) return 1;
-                return 0;
+                const score = (w) => {
+                    if (w.isGemini && !w.isArgon) return w.isFiveHour ? 1 : 2;
+                    if (w.isArgon) return w.isFiveHour ? 3 : 4;
+                    return w.isFiveHour ? 5 : 6;
+                };
+                return score(a) - score(b);
             });
 
             const windows = rawWindows.map(w => windowFromUsedPct(w));
@@ -736,7 +743,7 @@ export async function fetchAntigravityUsage() {
             let resetsAt = null;
 
             // Format 1: Table format e.g. "Gemini Models   Weekly Limit Remaining   56%   2026-10-14 04:37 UTC"
-            const m = line.match(/^(.*?)\\s{2,}(.*?Remaining)\\s+(\\d+)%(?:\\s+(.*))?$/i);
+            const m = line.match(/^(.*?)\\s{2,}(.*?)\\s+(\\d+)%(?:\\s+(.*))?$/i);
             if (m) {
                 scope = m[1].trim();
                 limitType = m[2].trim();
@@ -750,7 +757,7 @@ export async function fetchAntigravityUsage() {
             } else {
                 // Format 2: Tab / multi-space separated
                 const parts = line.split(/\\t+|\\s{2,}/).map(p => p.trim());
-                if (parts.length >= 3 && parts[1]?.toLowerCase().includes("remaining")) {
+                if (parts.length >= 3) {
                     scope = parts[0];
                     limitType = parts[1];
                     const remMatch = parts[2].match(/(\\d+)%/);
@@ -791,11 +798,16 @@ export async function fetchAntigravityUsage() {
                 const usedPct = Math.max(0, Math.min(100, 100 - remainingPct));
                 const isFiveHour = /session|five\\s*hour|5-?hour|5h/i.test(limitType);
                 const isWeekly = /week|7-?day/i.test(limitType);
-                const isGemini = /gemini/i.test(scope) || !/claude/i.test(scope);
+                const isArgon = /argon/i.test(scope) || /argon/i.test(limitType);
+                const isClaude = /claude|gpt/i.test(scope);
+                const isGemini = (/gemini/i.test(scope) || !isClaude) && !isArgon;
 
                 let id = isFiveHour ? "session" : isWeekly ? "weekly" : "quota";
                 let label = isFiveHour ? "Session" : isWeekly ? "Weekly" : limitType.replace(/\\s+Remaining$/i, "");
-                if (!isGemini) {
+                if (isArgon) {
+                    id = \`argon_\${id}\`;
+                    label = \`Gemini 4 Argon \${isFiveHour ? "Session" : isWeekly ? "Weekly" : limitType.replace(/\\s+Remaining$/i, "").replace(/^Gemini 4 Argon\\s+/i, "")}\`;
+                } else if (!isGemini) {
                     id = \`claude_\${id}\`;
                     label = \`Claude \${label}\`;
                 }
@@ -803,7 +815,7 @@ export async function fetchAntigravityUsage() {
                 rawWindows.push({
                     id,
                     label,
-                    shortLabel: isFiveHour ? "5h" : isWeekly ? "wk" : "",
+                    shortLabel: isFiveHour ? "5h" : isWeekly ? "wk" : isArgon ? "Argon" : "",
                     summary: true,
                     usedPct,
                     remainingPct,
@@ -811,16 +823,18 @@ export async function fetchAntigravityUsage() {
                     tone: toneFromUsedPct(usedPct),
                     isFiveHour,
                     isGemini,
+                    isArgon,
                 });
             }
         }
 
         rawWindows.sort((a, b) => {
-            if (a.isGemini && !b.isGemini) return -1;
-            if (!a.isGemini && b.isGemini) return 1;
-            if (a.isFiveHour && !b.isFiveHour) return -1;
-            if (!a.isFiveHour && b.isFiveHour) return 1;
-            return 0;
+            const score = (w) => {
+                if (w.isGemini && !w.isArgon) return w.isFiveHour ? 1 : 2;
+                if (w.isArgon) return w.isFiveHour ? 3 : 4;
+                return w.isFiveHour ? 5 : 6;
+            };
+            return score(a) - score(b);
         });
 
         const windows = rawWindows.map(w => ({

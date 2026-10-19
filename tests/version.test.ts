@@ -29,6 +29,6 @@ describe("Automated Versioning & Diagnostic Metadata", () => {
     expect(diagnostic).toContain("CLI Backend:");
     expect(diagnostic).toContain("Runtime: Node.js");
     expect(diagnostic).toContain("Features: Token Tracking, Context Meter, Quota Windows");
-    expect(diagnostic).toContain("Supported Models: 7");
+    expect(diagnostic).toContain("Supported Models: 8");
   });
 });

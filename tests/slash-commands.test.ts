@@ -128,6 +128,22 @@ describe("Slash Commands Handler", () => {
     expect(formatted).toContain("93%");
   });
 
+  it("should format /usage output with Gemini 4 Argon as its own distinct card", () => {
+    const sampleWithArgon =
+      "Quota:\r\n" +
+      "Gemini Models          Weekly Limit Remaining       98%   2026-10-24 14:55 UTC\r\n" +
+      "Gemini Models          Five Hour Limit Remaining    98%   2026-10-19 18:45 UTC\r\n" +
+      "Claude and GPT models  Weekly Limit Remaining       100%  2026-10-26 13:49 UTC\r\n" +
+      "Claude and GPT models  Five Hour Limit Remaining    100%  2026-10-19 18:49 UTC\r\n" +
+      "Gemini 4 Argon         Gemini 4 Argon Weekly Limit  95%   2026-10-24 16:27 UTC\r\n";
+    const formatted = formatUsageOutput(sampleWithArgon);
+    expect(formatted).toContain("Gemini 4 Argon");
+    expect(formatted).toContain("Google Gemini");
+    expect(formatted).toContain("Claude & GPT");
+    expect(formatted).toContain("**⚡ Gemini 4 Argon**");
+    expect(formatted).toContain("95%");
+  });
+
   it("should pass through unknown or model-level slash commands like /plan", async () => {
     const result = await executeSlashCommand("/plan do something", dummySession, "agy");
     expect(result.handled).toBe(false);

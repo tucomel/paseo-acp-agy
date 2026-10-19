@@ -299,7 +299,7 @@ export function formatUsageOutput(rawText: string): string {
     let pctStr = "";
     let reset = "";
 
-    const m = trimmedLine.match(/^(.*?)\s{2,}(.*?Remaining)\s+(\d+%)(?:\s+(.*))?$/i);
+    const m = trimmedLine.match(/^(.*?)\s{2,}(.*?)\s+(\d+%)(?:\s+(.*))?$/i);
     if (m) {
       fam = m[1].trim();
       rawWindow = m[2].trim();
@@ -315,19 +315,23 @@ export function formatUsageOutput(rawText: string): string {
     }
 
     let icon = "🤖";
-    if (fam.toLowerCase().includes("gemini")) {
+    const isArgon = fam.toLowerCase().includes("argon") || rawWindow.toLowerCase().includes("argon");
+    if (isArgon) {
+      fam = "Gemini 4 Argon";
+      icon = "⚡";
+    } else if (fam.toLowerCase().includes("gemini")) {
       fam = "Google Gemini";
       icon = "🔷";
-    } else if (fam.toLowerCase().includes("claude")) {
+    } else if (fam.toLowerCase().includes("claude") || fam.toLowerCase().includes("gpt")) {
       fam = "Claude & GPT";
       icon = "🔶";
     }
-    rawWindow = rawWindow.replace(/\s+Remaining$/i, "").trim();
+    rawWindow = rawWindow.replace(/\s+Remaining$/i, "").replace(/^Gemini 4 Argon\s+/i, "").trim();
     const lowerWindow = rawWindow.toLowerCase();
     const isFiveHour = lowerWindow.includes("five hour") || /\b5\s*hour/.test(lowerWindow);
     const win = isFiveHour
       ? "Janela de 5 Horas"
-      : lowerWindow.includes("weekly")
+      : lowerWindow.includes("weekly") || lowerWindow.includes("week")
         ? "Cota Semanal"
         : rawWindow;
     const parsedPct = Number.parseInt(pctStr.replace("%", ""), 10);

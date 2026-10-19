@@ -281,6 +281,7 @@ export interface ModelPricing {
 }
 
 export const MODEL_PRICING: Record<string, ModelPricing> = {
+  "gemini-4-argon": { inputCostPerM: 1.25, outputCostPerM: 5.00, cachedInputCostPerM: 0.3125 },
   "gemini-3.8-flash": { inputCostPerM: 0.10, outputCostPerM: 0.40, cachedInputCostPerM: 0.025 },
   "gemini-3.7-flash": { inputCostPerM: 0.10, outputCostPerM: 0.40, cachedInputCostPerM: 0.025 },
   "gemini-3.6-flash": { inputCostPerM: 0.10, outputCostPerM: 0.40, cachedInputCostPerM: 0.025 },
@@ -293,6 +294,7 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
 };
 
 export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "gemini-4-argon": 1_048_576,
   "gemini-3.8-flash": 1_048_576,
   "gemini-3.7-flash": 1_048_576,
   "gemini-3.6-flash": 1_048_576,
@@ -309,6 +311,7 @@ export function getModelContextWindow(modelId?: string): number {
   if (MODEL_CONTEXT_WINDOWS[modelId]) return MODEL_CONTEXT_WINDOWS[modelId];
 
   const lower = modelId.toLowerCase();
+  if (lower.includes("argon")) return 1_048_576;
   if (lower.includes("pro")) return 2_097_152;
   if (lower.includes("claude")) return 200_000;
   if (lower.includes("gpt")) return 128_000;
@@ -322,6 +325,7 @@ export function getModelPricing(modelId?: string): ModelPricing | null {
   if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
 
   const lower = modelId.toLowerCase();
+  if (lower.includes("argon")) return MODEL_PRICING["gemini-4-argon"];
   if (lower.includes("opus")) return MODEL_PRICING["claude-opus-4-6-thinking"];
   if (lower.includes("claude") || lower.includes("sonnet")) return MODEL_PRICING["claude-sonnet-4-6"];
   if (lower.includes("pro")) return MODEL_PRICING["gemini-3.1-pro"];
@@ -379,7 +383,7 @@ export function parseAgyQuotaOutput(raw: string): QuotaWindow[] {
     let remainingMatch: RegExpMatchArray | null = null;
     let resetsAt: string | null = null;
 
-    const m = trimmed.match(/^(.*?)\s{2,}(.*?Remaining)\s+(\d+%)(?:\s+(.*))?$/i);
+    const m = trimmed.match(/^(.*?)\s{2,}(.*?)\s+(\d+%)(?:\s+(.*))?$/i);
     if (m) {
       scope = m[1].trim();
       limitType = m[2].trim();
@@ -398,13 +402,18 @@ export function parseAgyQuotaOutput(raw: string): QuotaWindow[] {
     if (remainingMatch) {
       const remainingPct = parseInt(remainingMatch[1], 10);
       const usedPct = Math.max(0, Math.min(100, 100 - remainingPct));
-      const isFiveHour = /five\s*hour/i.test(limitType);
-      const isWeekly = /weekly/i.test(limitType);
-      const isGemini = /gemini/i.test(scope);
+      const isFiveHour = /session|five\s*hour|5-?hour|5h/i.test(limitType);
+      const isWeekly = /week|7-?day/i.test(limitType);
+      const isArgon = /argon/i.test(scope) || /argon/i.test(limitType);
+      const isClaude = /claude|gpt/i.test(scope);
+      const isGemini = (/gemini/i.test(scope) || !isClaude) && !isArgon;
 
       let id = isFiveHour ? "session" : isWeekly ? "weekly" : "quota";
       let label = isFiveHour ? "Session (5h)" : isWeekly ? "Weekly" : limitType;
-      if (!isGemini) {
+      if (isArgon) {
+        id = `argon_${id}`;
+        label = `Gemini 4 Argon ${isFiveHour ? "Session (5h)" : isWeekly ? "Weekly" : limitType.replace(/^Gemini 4 Argon\s+/i, "")}`;
+      } else if (!isGemini) {
         id = `claude_${id}`;
         label = `Claude ${label}`;
       }
@@ -590,6 +599,7 @@ export const ALL_THINKING_LEVELS: Record<string, { name: string; description: st
 };
 
 export const FALLBACK_MODELS: ModelDefinition[] = [
+  { modelId: "gemini-4-argon", name: "Gemini 4 Argon", description: "Google Gemini 4 Argon", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },
   { modelId: "gemini-3.8-flash", name: "Gemini 3.8 Flash", description: "Google Gemini 3.8 Flash", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },
   { modelId: "gemini-3.7-flash", name: "Gemini 3.7 Flash", description: "Google Gemini 3.7 Flash", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },
   { modelId: "gemini-3.6-flash", name: "Gemini 3.6 Flash", description: "Google Gemini 3.6 Flash", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },

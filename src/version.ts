@@ -147,7 +147,7 @@ export function formatDiagnosticVersion(): string {
     `  • CLI Backend: ${meta.agyBinaryPath} (v${meta.agyVersion})`,
     `  • Runtime: Node.js ${meta.nodeVersion} (${meta.platform} ${meta.arch})`,
     `  • Features: Token Tracking, Context Meter, Quota Windows, Model Pricing, Slash Commands (/help, /resume, /usage)`,
-    `  • Supported Models: 7 (gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro, claude-sonnet-4-6, claude-opus-4-6-thinking, gpt-oss-120b)`,
+    `  • Supported Models: 8 (gemini-4-argon, gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro, claude-sonnet-4-6, claude-opus-4-6-thinking, gpt-oss-120b)`,
     `  • Session Isolation: persistent agy subprocess per Paseo session`,
   ];
 
