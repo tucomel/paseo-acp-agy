@@ -17,6 +17,48 @@ export function getAgyAppDataDir(): string {
   return path.join(os.homedir(), ".gemini", "antigravity-cli");
 }
 
+interface DbSummaryRow {
+  conversation_id: string;
+  title: string | null;
+  preview: string | null;
+  last_modified_time: string | null;
+  workspace_uris: string | null;
+}
+
+function querySummariesDb(dbPath: string, query: string, params: any[] = []): DbSummaryRow[] {
+  // 1. Try node:sqlite DatabaseSync (Node 22+)
+  try {
+    const DatabaseSync = require("node:sqlite")?.DatabaseSync;
+    if (DatabaseSync) {
+      const db = new DatabaseSync(dbPath, { readOnly: true });
+      return (db.prepare(query).all(...params) as DbSummaryRow[]) || [];
+    }
+  } catch {}
+
+  // 2. Try sqlite3 CLI fallback (macOS, Linux with Node < 22)
+  try {
+    const { execFileSync } = require("node:child_process");
+    let finalQuery = query;
+    if (params.length === 1 && typeof params[0] === "string") {
+      finalQuery = query.replace("?", `'${params[0].replace(/'/g, "''")}'`);
+    }
+    const stdout = execFileSync("sqlite3", ["-json", dbPath, finalQuery], {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    if (stdout && stdout.trim()) {
+      return (JSON.parse(stdout) as DbSummaryRow[]) || [];
+    }
+  } catch (err) {
+    logger.debug("Failed to query conversation summaries via sqlite3 CLI", {
+      error: (err as Error).message,
+    });
+  }
+
+  return [];
+}
+
 export function loadNativeAntigravitySessions(cwd?: string): SessionInfo[] {
   const results: SessionInfo[] = [];
   const appDataDir = getAgyAppDataDir();
@@ -25,76 +67,68 @@ export function loadNativeAntigravitySessions(cwd?: string): SessionInfo[] {
   const normalizedTargetCwd = cwd ? path.resolve(cwd).toLowerCase() : undefined;
 
   if (fs.existsSync(dbPath)) {
-    let DatabaseSync: any = null;
     try {
-      DatabaseSync = require("node:sqlite")?.DatabaseSync;
-    } catch {}
+      const rows = querySummariesDb(
+        dbPath,
+        `SELECT conversation_id, title, preview, last_modified_time, workspace_uris
+         FROM conversation_summaries
+         ORDER BY last_modified_time DESC
+         LIMIT 100`
+      );
 
-    if (DatabaseSync) {
-      try {
-        const db = new DatabaseSync(dbPath, { readOnly: true });
-        const rows = db
-          .prepare(
-            `SELECT conversation_id, title, preview, last_modified_time, workspace_uris
-             FROM conversation_summaries
-             ORDER BY last_modified_time DESC
-             LIMIT 100`
-          )
-          .all() as Array<{
-            conversation_id: string;
-            title: string | null;
-            preview: string | null;
-            last_modified_time: string | null;
-            workspace_uris: string | null;
-          }>;
+      for (const row of rows) {
+        if (!row.conversation_id) continue;
 
-        for (const row of rows) {
-          if (!row.conversation_id) continue;
+        let primaryCwd = process.cwd();
+        let matchesCwd = false;
 
-          let primaryCwd = process.cwd();
-          let matchesCwd = false;
-
-          if (row.workspace_uris) {
-            try {
-              const uris = JSON.parse(row.workspace_uris) as string[];
-              if (Array.isArray(uris) && uris.length > 0) {
-                const filePaths = uris
-                  .map((u) => u.replace(/^file:\/\//i, ""))
-                  .filter(Boolean);
-                if (filePaths.length > 0) {
-                  primaryCwd = filePaths[0];
-                }
-                if (normalizedTargetCwd) {
-                  matchesCwd = filePaths.some(
-                    (p) => path.resolve(p).toLowerCase() === normalizedTargetCwd
-                  );
-                }
+        if (row.workspace_uris) {
+          try {
+            const uris = JSON.parse(row.workspace_uris) as string[];
+            if (Array.isArray(uris) && uris.length > 0) {
+              const filePaths = uris
+                .map((u) => {
+                  const cleaned = u.replace(/^file:\/\//i, "");
+                  try {
+                    return path.resolve(decodeURIComponent(cleaned));
+                  } catch {
+                    return path.resolve(cleaned);
+                  }
+                })
+                .filter(Boolean);
+              if (filePaths.length > 0) {
+                primaryCwd = filePaths[0];
               }
-            } catch {}
-          }
-
-          if (normalizedTargetCwd && !matchesCwd) {
-            continue;
-          }
-
-          const rawDate = row.last_modified_time;
-          const dateIso = rawDate ? new Date(rawDate).toISOString() : undefined;
-
-          results.push({
-            sessionId: row.conversation_id,
-            cwd: primaryCwd,
-            title:
-              (row.title && row.title.trim()) ||
-              (row.preview && row.preview.trim()) ||
-              "Antigravity Session",
-            updatedAt: dateIso,
-          });
+              if (normalizedTargetCwd) {
+                matchesCwd = filePaths.some(
+                  (p) => p.toLowerCase() === normalizedTargetCwd
+                );
+              }
+            }
+          } catch {}
         }
-      } catch (err) {
-        logger.debug("Failed to read native conversation summaries from sqlite", {
-          error: (err as Error).message,
+
+        if (normalizedTargetCwd && !matchesCwd) {
+          continue;
+        }
+
+        const rawDate = row.last_modified_time;
+        const dateIso = rawDate ? new Date(rawDate).toISOString() : undefined;
+
+        results.push({
+          sessionId: row.conversation_id,
+          cwd: primaryCwd,
+          title:
+            (row.title && row.title.trim()) ||
+            (row.preview && row.preview.trim()) ||
+            "Antigravity Session",
+          updatedAt: dateIso,
         });
       }
+    } catch (err) {
+      logger.debug("Failed to read native conversation summaries from sqlite", {
+        error: (err as Error).message,
+      });
     }
   }
 
@@ -139,55 +173,44 @@ export function getNativeAntigravitySession(conversationId: string): SessionInfo
   const dbPath = path.join(appDataDir, "conversation_summaries.db");
 
   if (fs.existsSync(dbPath)) {
-    let DatabaseSync: any = null;
     try {
-      DatabaseSync = require("node:sqlite")?.DatabaseSync;
-    } catch {}
+      const rows = querySummariesDb(
+        dbPath,
+        `SELECT conversation_id, title, preview, last_modified_time, workspace_uris
+         FROM conversation_summaries
+         WHERE conversation_id = ?`,
+        [conversationId]
+      );
+      const row = rows[0];
 
-    if (DatabaseSync) {
-      try {
-        const db = new DatabaseSync(dbPath, { readOnly: true });
-        const row = db
-          .prepare(
-            `SELECT conversation_id, title, preview, last_modified_time, workspace_uris
-             FROM conversation_summaries
-             WHERE conversation_id = ?`
-          )
-          .get(conversationId) as
-          | {
-              conversation_id: string;
-              title: string | null;
-              preview: string | null;
-              last_modified_time: string | null;
-              workspace_uris: string | null;
-            }
-          | undefined;
-
-        if (row) {
-          let primaryCwd = process.cwd();
-          if (row.workspace_uris) {
-            try {
-              const uris = JSON.parse(row.workspace_uris) as string[];
-              if (Array.isArray(uris) && uris.length > 0) {
-                const p = uris[0].replace(/^file:\/\//i, "");
-                if (p) primaryCwd = p;
+      if (row) {
+        let primaryCwd = process.cwd();
+        if (row.workspace_uris) {
+          try {
+            const uris = JSON.parse(row.workspace_uris) as string[];
+            if (Array.isArray(uris) && uris.length > 0) {
+              const cleaned = uris[0].replace(/^file:\/\//i, "");
+              try {
+                primaryCwd = path.resolve(decodeURIComponent(cleaned));
+              } catch {
+                primaryCwd = path.resolve(cleaned);
               }
-            } catch {}
-          }
-          return {
-            sessionId: row.conversation_id,
-            cwd: primaryCwd,
-            title:
-              (row.title && row.title.trim()) ||
-              (row.preview && row.preview.trim()) ||
-              "Antigravity Session",
-            updatedAt: row.last_modified_time
-              ? new Date(row.last_modified_time).toISOString()
-              : undefined,
-          };
+            }
+          } catch {}
         }
-      } catch {}
-    }
+        return {
+          sessionId: row.conversation_id,
+          cwd: primaryCwd,
+          title:
+            (row.title && row.title.trim()) ||
+            (row.preview && row.preview.trim()) ||
+            "Antigravity Session",
+          updatedAt: row.last_modified_time
+            ? new Date(row.last_modified_time).toISOString()
+            : undefined,
+        };
+      }
+    } catch {}
   }
 
   // Fallback check transcript file
