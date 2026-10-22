@@ -130,4 +130,41 @@ describe("Antigravity subprocess lifecycle", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(processExists(grandchildPid)).toBe(false);
   });
+
+  it("captures stderr diagnostic details when agy exits prematurely with an error", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-err-test-"));
+    tempDirs.push(dir);
+    const fakeAgy = path.join(dir, "fake-crash.mjs");
+    fs.writeFileSync(
+      fakeAgy,
+      `#!/usr/bin/env node\n` +
+        `process.stdout.write(JSON.stringify({event:"init",conversation_id:"c1",init:{}}) + "\\n");\n` +
+        `process.stdin.on("data", () => {\n` +
+        `  process.stderr.write("fatal: token expired or network unavailable\\n");\n` +
+        `  process.exit(1);\n` +
+        `});\n`,
+      { mode: 0o700 }
+    );
+
+    const adapter = new AntigravityProcess({ binaryPath: fakeAgy, cwd: dir });
+    await expect(adapter.sendPrompt("test")).rejects.toThrow(/fatal: token expired or network unavailable/);
+    await adapter.close();
+  });
+
+  it("decouples child process on cancelCurrentTurn so subsequent prompts execute on a fresh process", async () => {
+    const fake = makeFakeAgy({ responseDelayMs: 200 });
+    const adapter = new AntigravityProcess({ binaryPath: fake.fakeAgy, cwd: fake.dir, env: fake.env });
+
+    const prompt1 = adapter.sendPrompt("long running turn");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(adapter.cancelCurrentTurn()).toBe(true);
+
+    await expect(prompt1).rejects.toThrow(/cancelled/i);
+
+    // Immediately send second prompt - should succeed on fresh process without code 1 error
+    const prompt2 = await adapter.sendPrompt("subsequent prompt");
+    expect(prompt2.event).toBe("result");
+    expect(prompt2.result?.status).toBe("SUCCESS");
+    await adapter.close();
+  });
 });

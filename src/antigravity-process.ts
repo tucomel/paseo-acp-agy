@@ -447,6 +447,7 @@ export class AntigravityProcess extends EventEmitter {
     child.stderr.setEncoding("utf-8");
     let stdoutBuffer = "";
     let stderrBuffer = "";
+    const recentStderrLines: string[] = [];
 
     child.stdout.on("data", (chunk: string) => {
       this.emit("activity");
@@ -472,7 +473,12 @@ export class AntigravityProcess extends EventEmitter {
       const lines = stderrBuffer.split("\n");
       stderrBuffer = lines.pop() || "";
       for (const line of lines) {
-        if (line.trim()) logger.warn("agy stderr: " + line.trim());
+        const trimmed = line.trim();
+        if (trimmed) {
+          logger.warn("agy stderr: " + trimmed);
+          recentStderrLines.push(trimmed);
+          if (recentStderrLines.length > 20) recentStderrLines.shift();
+        }
       }
     });
 
@@ -487,11 +493,23 @@ export class AntigravityProcess extends EventEmitter {
 
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       logger.info("agy process exited", { code, signal, pid: child.pid });
+      if (stderrBuffer.trim()) {
+        recentStderrLines.push(stderrBuffer.trim());
+        if (recentStderrLines.length > 20) recentStderrLines.shift();
+      }
+      const stderrDiagnostic = recentStderrLines.join(" ").trim();
+      const exitDiagnostic = stderrDiagnostic
+        ? `agy process exited prematurely with code ${code} signal ${signal}: ${stderrDiagnostic}`
+        : `agy process exited prematurely with code ${code} signal ${signal}`;
+
       if (this.currentTurnPromise?.child === child) {
-        this.currentTurnPromise.reject(
-          new Error(`agy process exited prematurely with code ${code} signal ${signal}`)
-        );
+        const turn = this.currentTurnPromise;
         this.currentTurnPromise = null;
+        if (turn.cancelled) {
+          turn.reject(new Error("Turn was cancelled"));
+        } else {
+          turn.reject(new Error(exitDiagnostic));
+        }
       }
 
       // The leader can die while a tool subprocess remains in its process
@@ -836,6 +854,11 @@ export class AntigravityProcess extends EventEmitter {
     logger.info("Cancelling active agy turn", { hasChild: Boolean(active.child) });
     if (active.child) {
       const child = active.child;
+      // Immediately detach this.child so subsequent turns will NOT attach to this dying process!
+      if (this.child === child) {
+        this.child = null;
+        this.initialInfo = null;
+      }
       this.signalProcessTree(child, "SIGINT");
       setTimeout(() => {
         if (this.isProcessTreeAlive(child)) {

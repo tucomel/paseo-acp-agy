@@ -27,12 +27,11 @@ describe("Native Antigravity Sessions Discovery", () => {
   it("discovers native Antigravity conversations from SQLite database via CLI or DatabaseSync", () => {
     const dbPath = path.join(tempDir, "conversation_summaries.db");
 
-    // Create a mock SQLite database using sqlite3 CLI
-    execFileSync(
-      "sqlite3",
-      [
-        dbPath,
-        `CREATE TABLE conversation_summaries (
+    // Create a mock SQLite database using DatabaseSync or sqlite3 CLI
+    try {
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(dbPath);
+      db.exec(`CREATE TABLE conversation_summaries (
           conversation_id TEXT PRIMARY KEY,
           title TEXT,
           preview TEXT,
@@ -52,10 +51,38 @@ describe("Native Antigravity Sessions Discovery", () => {
           'Fix Header Layout',
           '2026-10-22T13:00:00.000Z',
           '["file:///Users/arthur/GIT/web"]'
-        );`,
-      ],
-      { stdio: "ignore" }
-    );
+        );`);
+      db.close();
+    } catch {
+      execFileSync(
+        "sqlite3",
+        [
+          dbPath,
+          `CREATE TABLE conversation_summaries (
+            conversation_id TEXT PRIMARY KEY,
+            title TEXT,
+            preview TEXT,
+            last_modified_time TEXT,
+            workspace_uris TEXT
+          );
+          INSERT INTO conversation_summaries VALUES (
+            'conv-1111-2222',
+            'Optimize Search Algorithm',
+            'Optimize Search Algorithm',
+            '2026-10-22T12:00:00.000Z',
+            '["file:///Users/arthur/GIT/search"]'
+          );
+          INSERT INTO conversation_summaries VALUES (
+            'conv-3333-4444',
+            'Fix Header Layout',
+            'Fix Header Layout',
+            '2026-10-22T13:00:00.000Z',
+            '["file:///Users/arthur/GIT/web"]'
+          );`,
+        ],
+        { stdio: "ignore" }
+      );
+    }
 
     const allSessions = loadNativeAntigravitySessions();
     expect(allSessions.length).toBe(2);

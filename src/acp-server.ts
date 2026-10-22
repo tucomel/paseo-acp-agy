@@ -691,10 +691,32 @@ export class ACPServer extends EventEmitter {
             };
 
             try {
-              const resultEvent: AgyResultEvent = await session.process.sendPrompt(
-                promptText,
-                onStepUpdate
-              );
+              let resultEvent: AgyResultEvent;
+              try {
+                resultEvent = await session.process.sendPrompt(
+                  promptText,
+                  onStepUpdate
+                );
+              } catch (firstErr) {
+                const firstMsg = (firstErr as Error).message || "";
+                if (
+                  stepCount === 0 &&
+                  !session.isCancelled &&
+                  firstMsg.includes("agy process exited prematurely")
+                ) {
+                  logger.warn("agy process exited before streaming any steps; retrying prompt with fresh process", {
+                    sessionId,
+                    error: firstMsg,
+                  });
+                  resultEvent = await session.process.sendPrompt(
+                    promptText,
+                    onStepUpdate
+                  );
+                } else {
+                  throw firstErr;
+                }
+              }
+
               const turnUsage = resultEvent.result?.usage;
               const numTurns = resultEvent.result?.num_turns || stepCount || 1;
 
@@ -725,10 +747,14 @@ export class ACPServer extends EventEmitter {
                 this.sendSuccess(id, { stopReason: "end_turn", usage: usagePayload });
               }
             } catch (promptErr) {
-              if (session.isCancelled) {
+              const errorMsg = (promptErr as Error).message || "Turn execution failed";
+              if (
+                session.isCancelled ||
+                errorMsg.includes("cancelled") ||
+                errorMsg.includes("Turn was cancelled")
+              ) {
                 if (!isNotification) this.sendSuccess(id, { stopReason: "cancelled" });
               } else {
-                const errorMsg = (promptErr as Error).message || "Turn execution failed";
                 logger.error("Error executing prompt turn", { error: errorMsg, sessionId });
                 this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                   sessionId: session.id,
