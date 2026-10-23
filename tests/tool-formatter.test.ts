@@ -108,6 +108,36 @@ describe("Tool Formatter & Visual Enhancements", () => {
     expect(res.questionCard).toContain("**[1]** PostgreSQL *(Recomendado)*");
     expect(res.questionCard).toContain("**[2]** SQLite");
     expect(res.questionCard).toContain("**[3]** MySQL");
+    expect(res.questionCard).toContain("Escolha única");
+  });
+
+  it("formats multiple questions with multi-select support correctly", () => {
+    const res = normalizeToolCall(
+      "ask_question",
+      {
+        questions: [
+          {
+            question: "Qual framework frontend prefere?",
+            is_multi_select: false,
+            options: ["(Recommended) Next.js", "Remix", "Vite"],
+          },
+          {
+            question: "Quais provedores de autenticação devemos incluir?",
+            is_multi_select: true,
+            options: ["(Recommended) Google OAuth", "GitHub OAuth", "Email / Senha"],
+          },
+        ],
+      },
+      7
+    );
+
+    expect(res.questionCard).toContain("Pergunta 1 de 2");
+    expect(res.questionCard).toContain("Escolha única");
+    expect(res.questionCard).toContain("Pergunta 2 de 2");
+    expect(res.questionCard).toContain("Múltipla escolha (você pode selecionar mais de uma opção");
+    expect(res.questionCard).toContain("- [ ] **[1]** Google OAuth *(Recomendado)*");
+    expect(res.questionCard).toContain("- [ ] **[2]** GitHub OAuth");
+    expect(res.questionCard).toContain("- [ ] **[3]** Email / Senha");
   });
 
   it("extracts markdown checklist items into Paseo plan entries", () => {

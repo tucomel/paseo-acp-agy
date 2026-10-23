@@ -249,24 +249,45 @@ export function extractPlanEntries(text: string): PlanEntry[] | null {
 
 /**
  * Formats Antigravity's ask_question structure into a clear, responsive markdown card.
+ * Supports multiple questions in a single call and single/multi-choice selection modes.
  */
 function formatQuestionCard(questions: unknown[]): string {
   if (!questions || questions.length === 0) return "";
 
+  const validQuestions = (questions as Array<{
+    question?: string;
+    options?: string[];
+    is_multi_select?: boolean;
+  }>).filter((q) => q && typeof q === "object");
+
+  const total = validQuestions.length;
   const cards: string[] = [];
-  for (const q of questions as Array<{ question?: string; options?: string[] }>) {
-    if (!q || typeof q !== "object") continue;
+
+  for (let i = 0; i < total; i++) {
+    const q = validQuestions[i];
     const prompt = q.question || "Escolha uma opção:";
     const options = Array.isArray(q.options) ? q.options : [];
+    const isMulti = Boolean(q.is_multi_select);
 
-    let card = `### ❓ Pergunta do Assistente\n> **${prompt}**\n\n`;
+    const titlePrefix = total > 1
+      ? `### ❓ Pergunta ${i + 1} de ${total}`
+      : `### ❓ Pergunta do Assistente`;
+
+    let card = `${titlePrefix}\n> **${prompt}**\n\n`;
+
     if (options.length > 0) {
-      card += `*Responda indicando o número da opção desejada:*\n`;
+      if (isMulti) {
+        card += `*☑️ Múltipla escolha (você pode selecionar mais de uma opção, ex: 1, 3):*\n`;
+      } else {
+        card += `*🔘 Escolha única (selecione uma das opções abaixo):*\n`;
+      }
+
       card += options
         .map((opt, idx) => {
           const isRec = opt.includes("(Recommended)") || opt.includes("(Recomendado)");
           const clean = opt.replace(/^\(Recommended\)\s*/i, "").replace(/^\(Recomendado\)\s*/i, "");
-          return `- **[${idx + 1}]** ${clean}${isRec ? " *(Recomendado)*" : ""}`;
+          const mark = isMulti ? "- [ ]" : "-";
+          return `${mark} **[${idx + 1}]** ${clean}${isRec ? " *(Recomendado)*" : ""}`;
         })
         .join("\n");
     }
