@@ -101,7 +101,7 @@ describe("Tool Formatter & Visual Enhancements", () => {
       6
     );
 
-    expect(res.kind).toBe("other");
+    expect(res.kind).toBe("question");
     expect(res.title).toBe("❓ Pergunta do Assistente");
     expect(res.questionCard).toBeDefined();
     expect(res.questionCard).toContain("Qual banco de dados deseja configurar?");

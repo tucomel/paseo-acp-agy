@@ -161,7 +161,7 @@ export interface SessionInfo {
   _meta?: Record<string, unknown> | null;
 }
 
-export type ToolKind = "read" | "edit" | "execute" | "fetch" | "search" | "other";
+export type ToolKind = "read" | "edit" | "execute" | "fetch" | "search" | "question" | "other";
 
 export function mapToolNameToKind(toolName: string): ToolKind {
   const name = toolName.toLowerCase();

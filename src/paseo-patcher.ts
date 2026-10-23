@@ -1223,6 +1223,65 @@ ${braceIndent}}`;
         }
       }
 
+      // Patch mapPermissionRequest for native QuestionFormCard support in Paseo UI
+      if (!acpCode.includes("snapshot?.kind === \"question\" || params?.kind === \"question\"")) {
+        const oldMapPermRegex = /function\s+mapPermissionRequest\s*\([^)]*\)\s*\{[\s\S]*?const\s+kind\s*=\s*snapshot\.kind\s*===\s*"switch_mode"\s*\?\s*"mode"\s*:\s*"tool";/m;
+        const newMapPerm = `function mapPermissionRequest(provider, requestId, params, snapshot) {
+    if (snapshot?.kind === "question" || params?.kind === "question" || (params?.questions && Array.isArray(params.questions)) || (snapshot?.rawInput?.questions && Array.isArray(snapshot?.rawInput?.questions))) {
+        const rawQ = params.questions || snapshot?.rawInput?.questions || [];
+        const questions = rawQ.map((q, idx) => ({
+            header: q.header || q.title || ("Question " + (idx + 1)),
+            question: q.question || q.prompt || "Escolha uma opção:",
+            options: (q.options || []).map((opt) => typeof opt === "string" ? {
+                label: opt.replace(/^\\(Recommended\\)\\s*/i, "").replace(/^\\(Recomendado\\)\\s*/i, "").trim(),
+                description: (opt.includes("(Recommended)") || opt.includes("(Recomendado)")) ? "Recomendado" : undefined
+            } : { label: opt.label || String(opt), description: opt.description }),
+            multiSelect: q.multiSelect === true || q.is_multi_select === true || q.multiple === true,
+            allowOther: true,
+            allowEmpty: false,
+        }));
+        return {
+            id: requestId,
+            provider,
+            name: "question",
+            kind: "question",
+            title: params.toolCall?.title ?? snapshot?.title ?? "Pergunta do Assistente",
+            input: { questions },
+            actions: (params.options || []).map((option) => ({
+                id: option.optionId,
+                label: option.name,
+                behavior: option.kind.startsWith("allow") ? "allow" : "deny",
+            })),
+            metadata: {
+                toolCallId: params.toolCall?.toolCallId,
+                rawRequest: params,
+                options: params.options,
+            },
+        };
+    }
+    const kind = snapshot.kind === "switch_mode" ? "mode" : "tool";`;
+        if (oldMapPermRegex.test(acpCode)) {
+          acpCode = acpCode.replace(oldMapPermRegex, newMapPerm);
+          acpModified = true;
+          changes.push(`Patched ${acpFile} for interactive QuestionFormCard support`);
+        }
+      }
+
+      // Patch respondToPermission for QuestionFormCard updatedInput.answers
+      if (!acpCode.includes("response.updatedInput?.answers")) {
+        const oldRespondMatch = acpCode.match(/this\.pendingPermissions\.delete\(requestId\);[\s\S]*?pending\.resolve\([\s\S]*?\);\s*\r?\n\s*this\.pushEvent/m);
+        if (oldRespondMatch) {
+          const newRespond = `this.pendingPermissions.delete(requestId);
+        const outcome = response.updatedInput?.answers
+            ? { outcome: "selected", optionId: selectedOption?.optionId || "form_submit", _meta: { answers: response.updatedInput.answers } }
+            : (selectedOption ? { outcome: { outcome: "selected", optionId: selectedOption.optionId } } : { outcome: { outcome: "cancelled" } });
+        pending.resolve(response.updatedInput?.answers ? { outcome } : (selectedOption ? { outcome: { outcome: "selected", optionId: selectedOption.optionId } } : { outcome: { outcome: "cancelled" } }));
+        this.pushEvent`;
+          acpCode = acpCode.replace(oldRespondMatch[0], newRespond);
+          acpModified = true;
+        }
+      }
+
       if (acpModified) {
         fs.writeFileSync(acpFile, acpCode, "utf-8");
         changes.push(`Patched ${acpFile} for context-window token telemetry and usage updates`);

@@ -150,7 +150,7 @@ export function normalizeToolCall(
     return {
       toolCallId,
       title: "❓ Pergunta do Assistente",
-      kind: "other",
+      kind: "question",
       rawInput: normalizedParams,
       questionCard: questionCard || undefined,
     };

@@ -52,6 +52,11 @@ export class ACPServer extends EventEmitter {
   private skipNarration: boolean;
   private rl: readline.Interface | null = null;
   private isRunning = false;
+  private pendingRequests = new Map<string | number, {
+    resolve: (value: any) => void;
+    reject: (reason?: any) => void;
+  }>();
+  private nextRequestId = 1;
 
   constructor(options: {
     input?: Readable;
@@ -131,6 +136,14 @@ export class ACPServer extends EventEmitter {
       error: { code, message, ...(data !== undefined ? { data } : {}) },
     };
     this.send(response);
+  }
+
+  public sendRequest<T = any>(method: string, params: unknown): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const id = this.nextRequestId++;
+      this.pendingRequests.set(id, { resolve, reject });
+      this.send({ jsonrpc: "2.0", id, method, params });
+    });
   }
 
   private publishCommands(sessionId: string) {
@@ -253,6 +266,20 @@ export class ACPServer extends EventEmitter {
     const isNotification = id === undefined || id === null;
     const params = (parsed.params || {}) as Record<string, unknown>;
     logger.debug("Received ACP message", { method, isNotification, id });
+
+    // Handle responses to requests initiated by the server (e.g. session/request_permission)
+    if (id !== undefined && !method) {
+      const pending = this.pendingRequests.get(id);
+      if (pending) {
+        this.pendingRequests.delete(id);
+        if (parsed.error) {
+          pending.reject(parsed.error);
+        } else {
+          pending.resolve(parsed.result);
+        }
+        return;
+      }
+    }
 
     try {
       switch (method) {
@@ -634,13 +661,72 @@ export class ACPServer extends EventEmitter {
                     },
                   });
 
-                  if (toolCall.questionCard) {
-                    this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                  if (toolName === "ask_question") {
+                    const rawParams = (step.tool_info.parameters as Record<string, unknown>) || {};
+                    const rawQuestions = Array.isArray(rawParams.questions)
+                      ? (rawParams.questions as Array<{ question?: string; options?: string[]; is_multi_select?: boolean }>)
+                      : [];
+
+                    const options: Array<{ optionId: string; name: string; kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" }> = [];
+                    for (let qIdx = 0; qIdx < rawQuestions.length; qIdx++) {
+                      const q = rawQuestions[qIdx];
+                      const opts = Array.isArray(q.options) ? q.options : [];
+                      for (let optIdx = 0; optIdx < opts.length; optIdx++) {
+                        const opt = opts[optIdx];
+                        const clean = typeof opt === "string" ? opt.replace(/^\(Recommended\)\s*/i, "").trim() : String(opt);
+                        const isRec = typeof opt === "string" && (opt.includes("(Recommended)") || opt.includes("(Recomendado)"));
+                        options.push({
+                          optionId: `q${qIdx + 1}_opt${optIdx + 1}`,
+                          name: `${clean}${isRec ? " (Recomendado)" : ""}`,
+                          kind: "allow_once",
+                        });
+                      }
+                    }
+                    options.push({
+                      optionId: "cancel",
+                      name: "Cancelar",
+                      kind: "reject_once",
+                    });
+
+                    const promptText = rawQuestions.map((q) => q.question).filter(Boolean).join(" / ") || "Pergunta do Assistente";
+                    this.sendRequest("session/request_permission", {
                       sessionId: session.id,
-                      update: {
-                        sessionUpdate: "agent_message_chunk",
-                        content: { type: "text", text: `\n\n${toolCall.questionCard}\n\n` },
+                      toolCall: {
+                        toolCallId: toolCall.toolCallId,
+                        title: toolCall.title,
+                        kind: "question",
+                        content: [{ type: "text", text: promptText }],
+                        rawInput: toolCall.rawInput,
                       },
+                      options,
+                      questions: rawQuestions,
+                    }).then((permRes: any) => {
+                      logger.info("Interactive question answered in Paseo", { permRes });
+                      const outcome = permRes?.outcome;
+                      let answerText = "";
+                      if (outcome?._meta?.answers && typeof outcome._meta.answers === "object") {
+                        answerText = Object.entries(outcome._meta.answers)
+                          .map(([k, v]) => `• **${k}**: ${v}`)
+                          .join("\n");
+                      } else if (outcome?.optionId && outcome.optionId !== "cancel") {
+                        const matched = options.find((o) => o.optionId === outcome.optionId);
+                        answerText = matched ? matched.name : outcome.optionId;
+                      }
+
+                      if (answerText) {
+                        this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                          sessionId: session.id,
+                          update: {
+                            sessionUpdate: "agent_message_chunk",
+                            content: {
+                              type: "text",
+                              text: `\n\n> 💡 **Opção Selecionada:**\n${answerText}\n\n`,
+                            },
+                          },
+                        });
+                      }
+                    }).catch((err) => {
+                      logger.debug("Interactive question cancelled or dismissed", { error: (err as Error).message });
                     });
                   }
                 } else if (step.state === "DONE") {
