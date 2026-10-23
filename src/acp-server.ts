@@ -29,6 +29,8 @@ import { executeSlashCommand, AVAILABLE_SLASH_COMMANDS } from "./slash-commands.
 import { getShortVersion } from "./version.js";
 import { resolveDefaultAgyBinary } from "./antigravity-process.js";
 import { loadConversationTranscript } from "./transcript.js";
+import { normalizeToolCall, normalizeToolResult, extractPlanEntries } from "./tool-formatter.js";
+import { McpBridge, McpServerConfig } from "./mcp-bridge.js";
 
 function splitModelAndEffort(modelInput?: string): { model?: string; effort?: string } {
   if (!modelInput) return {};
@@ -43,6 +45,7 @@ function splitModelAndEffort(modelInput?: string): { model?: string; effort?: st
 
 export class ACPServer extends EventEmitter {
   private sessionManager: SessionManager;
+  private mcpBridge: McpBridge;
   private input: Readable;
   private output: Writable;
   private binaryPath: string;
@@ -61,6 +64,7 @@ export class ACPServer extends EventEmitter {
     this.input = options.input || process.stdin;
     this.output = options.output || process.stdout;
     this.binaryPath = options.binaryPath || resolveDefaultAgyBinary();
+    this.mcpBridge = new McpBridge(this.binaryPath);
     this.skipNarration =
       options.skipNarration ?? (process.env.AGY_ACP_SKIP_NARRATION === "true");
     this.sessionManager =
@@ -280,6 +284,10 @@ export class ACPServer extends EventEmitter {
           const requestedModel = typeof params.model === "string" ? params.model : undefined;
           const parsedModel = splitModelAndEffort(requestedModel);
           const mode = typeof params.mode === "string" ? params.mode : undefined;
+          const mcpServers = params.mcpServers as Record<string, McpServerConfig> | undefined;
+          if (mcpServers) {
+            void this.mcpBridge.syncServers(mcpServers);
+          }
           const session = this.sessionManager.createSession({
             cwd,
             model: parsedModel.model,
@@ -314,6 +322,11 @@ export class ACPServer extends EventEmitter {
           if (!sessionId) {
             if (!isNotification) this.sendError(id, -32602, "sessionId is required");
             break;
+          }
+
+          const mcpServers = params.mcpServers as Record<string, McpServerConfig> | undefined;
+          if (mcpServers) {
+            void this.mcpBridge.syncServers(mcpServers);
           }
 
           let session = this.sessionManager.getSession(sessionId);
@@ -578,6 +591,18 @@ export class ACPServer extends EventEmitter {
                     content: { type: "text", text: step.text_delta },
                   },
                 });
+
+                // Live Plan / Todo checklist tracker
+                const planEntries = extractPlanEntries(step.text_delta);
+                if (planEntries) {
+                  this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                    sessionId: session.id,
+                    update: {
+                      sessionUpdate: "plan",
+                      entries: planEntries,
+                    },
+                  });
+                }
               } else if (step.step_type === "thought" && step.text_delta) {
                 hasSentNonNarration = true;
                 this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
@@ -589,30 +614,52 @@ export class ACPServer extends EventEmitter {
                 });
               } else if (step.step_type === "tool" && step.tool_info) {
                 hasSentNonNarration = true;
-                const toolCallId = `tool_${step.step_index}`;
                 const toolName = step.tool_name || step.tool_info.name || "tool";
-                const toolKind = mapToolNameToKind(toolName);
+                const toolCall = normalizeToolCall(
+                  toolName,
+                  (step.tool_info.parameters as Record<string, unknown>) || {},
+                  step.step_index
+                );
+
                 if (step.state === "ACTIVE") {
                   this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                     sessionId: session.id,
                     update: {
                       sessionUpdate: "tool_call",
-                      toolCallId,
-                      title: toolName,
-                      kind: toolKind,
-                      rawInput: step.tool_info.parameters || {},
+                      toolCallId: toolCall.toolCallId,
+                      title: toolCall.title,
+                      kind: toolCall.kind,
+                      ...(toolCall.locations ? { locations: toolCall.locations } : {}),
+                      rawInput: toolCall.rawInput,
                     },
                   });
+
+                  if (toolCall.questionCard) {
+                    this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                      sessionId: session.id,
+                      update: {
+                        sessionUpdate: "agent_message_chunk",
+                        content: { type: "text", text: `\n\n${toolCall.questionCard}\n\n` },
+                      },
+                    });
+                  }
                 } else if (step.state === "DONE") {
+                  const toolRes = normalizeToolResult(
+                    toolName,
+                    (step.tool_info.parameters as Record<string, unknown>) || {},
+                    step.tool_info.output
+                  );
                   this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                     sessionId: session.id,
                     update: {
                       sessionUpdate: "tool_call_update",
-                      toolCallId,
-                      status: "completed",
-                      rawOutput: step.tool_info.output ?? "",
+                      toolCallId: toolCall.toolCallId,
+                      status: toolRes.status,
+                      rawOutput: toolRes.rawOutput,
+                      ...(toolRes.content ? { content: toolRes.content } : {}),
                     },
                   });
+
                   const imageMarkdown = extractImageMarkdownLink(
                     toolName,
                     step.tool_info.output,
@@ -628,13 +675,19 @@ export class ACPServer extends EventEmitter {
                     });
                   }
                 } else if (step.state === "ERROR") {
+                  const toolRes = normalizeToolResult(
+                    toolName,
+                    (step.tool_info.parameters as Record<string, unknown>) || {},
+                    null,
+                    step.tool_info.error || { message: "Tool execution error" }
+                  );
                   this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                     sessionId: session.id,
                     update: {
                       sessionUpdate: "tool_call_update",
-                      toolCallId,
+                      toolCallId: toolCall.toolCallId,
                       status: "failed",
-                      rawOutput: step.tool_info.error?.message || "Tool execution error",
+                      rawOutput: toolRes.rawOutput,
                     },
                   });
                 }

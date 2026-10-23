@@ -161,17 +161,24 @@ export interface SessionInfo {
   _meta?: Record<string, unknown> | null;
 }
 
-export type ToolKind = "read" | "edit" | "execute" | "fetch" | "other";
+export type ToolKind = "read" | "edit" | "execute" | "fetch" | "search" | "other";
 
 export function mapToolNameToKind(toolName: string): ToolKind {
   const name = toolName.toLowerCase();
   if (
+    name.includes("search") ||
+    name.includes("grep") ||
+    name.includes("find") ||
+    name === "search_web" ||
+    name === "grep_search" ||
+    name === "find_by_name"
+  ) return "search";
+  if (
     name.includes("read") ||
     name.includes("view") ||
     name.includes("list") ||
-    name.includes("grep") ||
-    name.includes("find") ||
     name === "view_file" ||
+    name === "read_file" ||
     name === "list_dir"
   ) return "read";
   if (
@@ -187,13 +194,12 @@ export function mapToolNameToKind(toolName: string): ToolKind {
     name.includes("command") ||
     name.includes("terminal") ||
     name.includes("execute") ||
+    name.includes("subagent") ||
     name === "run_command"
   ) return "execute";
   if (
-    name.includes("search") ||
     name.includes("url") ||
-    name.includes("browser") ||
-    name === "search_web"
+    name.includes("browser")
   ) return "fetch";
   return "other";
 }

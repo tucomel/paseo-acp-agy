@@ -134,8 +134,9 @@ describe("ACP Prompt Streaming & Tool Call Translation", () => {
     // Verify tool call
     const toolCall = notifications.find((n) => n.params.update.sessionUpdate === "tool_call");
     expect(toolCall).toBeDefined();
-    expect(toolCall.params.update.title).toBe("view_file");
+    expect(toolCall.params.update.title).toBe("test.txt");
     expect(toolCall.params.update.kind).toBe("read");
+    expect(toolCall.params.update.locations).toEqual([{ path: "/tmp/test.txt" }]);
 
     // Verify tool call update
     const toolCallUpdate = notifications.find(

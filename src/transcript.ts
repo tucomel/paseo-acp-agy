@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { logger } from "./logger.js";
 import { mapToolNameToKind, ToolKind } from "./protocol.js";
+import { normalizeToolCall } from "./tool-formatter.js";
 
 export interface ReplayItem {
   type: "user_message" | "agent_message" | "agent_thought" | "tool_call" | "tool_call_update";
@@ -129,23 +130,20 @@ export function loadConversationTranscript(conversationId: string): ReplayItem[]
           for (let i = 0; i < step.tool_calls.length; i++) {
             const tc = step.tool_calls[i] as Record<string, unknown>;
             const rawArgs = (tc.args || tc.parameters || {}) as Record<string, unknown>;
-            const toolName = String(tc.name || tc.tool_name || rawArgs.toolAction || "tool");
-            const title = String(
-              rawArgs.toolSummary ||
-                rawArgs.toolAction ||
-                tc.toolSummary ||
-                tc.toolAction ||
-                tc.name ||
-                "tool"
-            );
-            const toolCallId = `tool_${stepIndex}_${i}`;
-            lastToolCallId = toolCallId;
+            const toolName = String(tc.name || tc.tool_name || tc.toolAction || rawArgs.toolAction || "tool");
+            const mergedParams: Record<string, unknown> = {
+              ...rawArgs,
+              toolSummary: rawArgs.toolSummary || tc.toolSummary,
+              toolAction: rawArgs.toolAction || tc.toolAction,
+            };
+            const toolCall = normalizeToolCall(toolName, mergedParams, stepIndex * 100 + i);
+            lastToolCallId = toolCall.toolCallId;
             replayItems.push({
               type: "tool_call",
-              toolCallId,
-              title,
-              kind: mapToolNameToKind(toolName),
-              rawInput: rawArgs,
+              toolCallId: toolCall.toolCallId,
+              title: toolCall.title,
+              kind: toolCall.kind,
+              rawInput: toolCall.rawInput,
             });
           }
         }
