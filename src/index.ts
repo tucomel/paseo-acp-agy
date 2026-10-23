@@ -7,6 +7,7 @@ import { logger } from "./logger.js";
 import { formatDiagnosticVersion, resolveBuildMetadata } from "./version.js";
 import {
   ensurePaseoIntegration,
+  restorePaseoIntegration,
   findPaseoServerInstallations,
   findPaseoAsarPaths,
   isPaseoServerPatched,
@@ -40,11 +41,14 @@ Usage:
 Commands:
   setup, patch   Configure and integrate Antigravity telemetry with Paseo
   doctor         Diagnose Antigravity binary, quota provider, and Paseo status
+  restore        Restore original Paseo files from backup (.bak)
 
 Options:
   --acp             Start ACP server over stdio (default)
   --setup           Integrate Antigravity with local Paseo server installation
   --doctor          Run environment, binary, and telemetry diagnostics
+  --restore         Restore original Paseo files from backup
+  --force-macos-app Force patching inside macOS .app bundle (re-signs with ad-hoc)
   --skip-naration   Drop leading narration-only assistant chunks (e.g. 'I will...')
   --skip-narration  Alias for --skip-naration
   -v, --version     Show version
@@ -223,6 +227,31 @@ if (args.includes("doctor") || args.includes("--doctor")) {
 }
 
 if (
+  args.includes("restore") ||
+  args.includes("unpatch") ||
+  args.includes("--restore") ||
+  args.includes("--unpatch")
+) {
+  process.stdout.write("Restoring original Paseo files from backup...\n");
+  try {
+    const res = await restorePaseoIntegration();
+    if (res.restored.length > 0) {
+      process.stdout.write(
+        `Successfully restored original files:\n${res.restored.map((r) => `  - ${r}`).join("\n")}\n\n`
+      );
+    } else {
+      process.stdout.write("No backup archives (.bak) found to restore.\n\n");
+    }
+    if (res.errors.length > 0) {
+      process.stderr.write(`Errors during restore:\n${res.errors.map((e) => `  - ${e}`).join("\n")}\n`);
+    }
+  } catch (err) {
+    process.stderr.write(`Restore encountered an issue: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+  process.exit(0);
+}
+
+if (
   args.includes("setup") ||
   args.includes("patch") ||
   args.includes("--setup") ||
@@ -235,16 +264,19 @@ if (
   }
   process.stdout.write("Checking Paseo installation and configuring Antigravity telemetry...\n");
   try {
-    const res = await ensurePaseoIntegration({ verbose: true });
+    const forceMacosApp = args.includes("--force-macos-app");
+    const res = await ensurePaseoIntegration({ verbose: true, forceMacosApp });
     if (!res.found) {
       process.stdout.write(
         "Notice: No active @getpaseo/server installation or app.asar found in standard paths.\n" +
         "If Paseo is installed in a custom directory, set PASEO_SERVER_PATH or PASEO_ASAR_PATH and run setup again.\n"
       );
     } else {
-      const totalFound = res.serverPaths.length + (res.asarPaths?.length || 0);
+      const totalFound = res.serverPaths.length + (res.asarPaths?.length || 0) + (res.skippedPaths?.length || 0);
       process.stdout.write(
-        `Found ${totalFound} Paseo installation target(s) (${res.serverPaths.length} server dir(s), ${res.asarPaths?.length || 0} asar package(s)).\n`
+        `Found ${totalFound} Paseo installation target(s) (${res.serverPaths.length} server dir(s), ${res.asarPaths?.length || 0} asar package(s)` +
+        (res.skippedPaths && res.skippedPaths.length > 0 ? `, ${res.skippedPaths.length} protected macOS app bundle(s)` : "") +
+        `).\n`
       );
       const allPatched = [...res.patchedPaths, ...(res.patchedAsarPaths || [])];
       if (allPatched.length > 0) {
@@ -252,9 +284,22 @@ if (
           `Successfully integrated with: \n${allPatched.map((p) => `  - ${p}`).join("\n")}\n\n` +
           `Antigravity quota provider and context-window telemetry are now enabled!\n`
         );
+      } else if (res.skippedPaths && res.skippedPaths.length > 0) {
+        process.stdout.write("Paseo server is ready. macOS .app bundle signature was preserved.\n");
       } else {
         process.stdout.write("Paseo is already up-to-date and configured for Antigravity telemetry.\n");
       }
+
+      if (res.skippedPaths && res.skippedPaths.length > 0) {
+        process.stdout.write(
+          `\n🛡️  Preserved macOS Code Signature:\n` +
+          `   Skipped ${res.skippedPaths.length} target(s) inside macOS .app bundle to protect official Apple Developer ID signature\n` +
+          `   and prevent Gatekeeper "damaged app" warnings.\n` +
+          `   (Antigravity ACP runs standalone and does not require modifying Paseo.app).\n` +
+          `   If you specifically wish to patch the .app bundle, run with: paseo-acp-agy patch --force-macos-app\n\n`
+        );
+      }
+
       if (isPaseoRunning()) {
         const isWin = process.platform === "win32";
         process.stdout.write(

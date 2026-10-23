@@ -11,6 +11,7 @@ export interface PatchResult {
   patchedPaths: string[];
   asarPaths?: string[];
   patchedAsarPaths?: string[];
+  skippedPaths?: string[];
   errors: string[];
 }
 
@@ -1497,6 +1498,13 @@ export async function patchPaseoAsar(
           timeout: 15000,
         });
         changes.push(`Re-signed macOS bundle at ${appBundlePath}`);
+        try {
+          execFileSync("xattr", ["-cr", appBundlePath], {
+            stdio: "ignore",
+            timeout: 10000,
+          });
+          changes.push(`Cleared quarantine extended attributes at ${appBundlePath}`);
+        } catch {}
       } catch (signErr) {
         logger.warn(`Could not re-sign ${appBundlePath}`, { error: String(signErr) });
       }
@@ -1527,12 +1535,38 @@ export async function ensurePaseoIntegration(options?: {
   verbose?: boolean;
   targetPaths?: string[];
   targetAsarPaths?: string[];
+  forceMacosApp?: boolean;
 }): Promise<PatchResult> {
-  const serverPaths = options?.targetPaths || findPaseoServerInstallations();
-  const asarPaths = options?.targetAsarPaths || findPaseoAsarPaths();
+  const rawServerPaths = options?.targetPaths || findPaseoServerInstallations();
+  const rawAsarPaths = options?.targetAsarPaths || findPaseoAsarPaths();
+  const serverPaths: string[] = [];
+  const asarPaths: string[] = [];
+  const skippedPaths: string[] = [];
   const patchedPaths: string[] = [];
   const patchedAsarPaths: string[] = [];
   const errors: string[] = [];
+
+  for (const sPath of rawServerPaths) {
+    if (process.platform === "darwin" && sPath.includes(".app") && !options?.forceMacosApp) {
+      skippedPaths.push(sPath);
+      if (options?.verbose) {
+        logger.info(`[macOS] Skipping server path inside .app bundle to preserve Apple signature: ${sPath}`);
+      }
+      continue;
+    }
+    serverPaths.push(sPath);
+  }
+
+  for (const aPath of rawAsarPaths) {
+    if (process.platform === "darwin" && aPath.includes(".app") && !options?.forceMacosApp) {
+      skippedPaths.push(aPath);
+      if (options?.verbose) {
+        logger.info(`[macOS] Skipping app.asar inside .app bundle to preserve Apple signature: ${aPath}`);
+      }
+      continue;
+    }
+    asarPaths.push(aPath);
+  }
 
   for (const sPath of serverPaths) {
     const res = patchPaseoServer(sPath);
@@ -1563,13 +1597,55 @@ export async function ensurePaseoIntegration(options?: {
   }
 
   return {
-    found: serverPaths.length > 0 || asarPaths.length > 0,
+    found: serverPaths.length > 0 || asarPaths.length > 0 || skippedPaths.length > 0,
     serverPaths,
     patchedPaths,
     asarPaths,
     patchedAsarPaths,
+    skippedPaths,
     errors,
   };
+}
+
+/**
+ * Restores original unpatched Paseo files from backup (.bak) archives.
+ */
+export async function restorePaseoIntegration(): Promise<{
+  restored: string[];
+  errors: string[];
+}> {
+  const restored: string[] = [];
+  const errors: string[] = [];
+  const home = os.homedir();
+  const macBackup = path.join(home, ".paseo", "backups", "app.asar.bak");
+  const asarCandidates = findPaseoAsarPaths();
+
+  for (const asarPath of asarCandidates) {
+    let backupFile: string | null = null;
+    if (process.platform === "darwin" && asarPath.includes(".app") && fs.existsSync(macBackup)) {
+      backupFile = macBackup;
+    } else if (fs.existsSync(`${asarPath}.bak`)) {
+      backupFile = `${asarPath}.bak`;
+    }
+
+    if (backupFile) {
+      try {
+        fs.copyFileSync(backupFile, asarPath);
+        restored.push(asarPath);
+        if (process.platform === "darwin" && asarPath.includes(".app")) {
+          const appIndex = asarPath.indexOf(".app");
+          const appBundlePath = asarPath.slice(0, appIndex + 4);
+          try {
+            execFileSync("xattr", ["-cr", appBundlePath], { stdio: "ignore" });
+          } catch {}
+        }
+      } catch (err: any) {
+        errors.push(`Failed restoring ${asarPath}: ${err?.message || err}`);
+      }
+    }
+  }
+
+  return { restored, errors };
 }
 
 /**

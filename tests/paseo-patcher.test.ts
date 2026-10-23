@@ -8,6 +8,7 @@ import {
   patchPaseoServer,
   patchPaseoAsar,
   ensurePaseoIntegration,
+  restorePaseoIntegration,
   generateAntigravityQuotaProviderJs,
   generateAntigravityPluginUsageTs,
   isPaseoServerPatched,
@@ -530,5 +531,46 @@ class ACPAgentSession {
     await createPackage(asarSrcDir, asarPath);
 
     expect(await isPaseoAsarPatched(asarPath)).toBe(true);
+  });
+
+  it("should skip macOS .app bundles by default to protect Apple signature and prevent Gatekeeper errors", async () => {
+    const originalPlatform = process.platform;
+    try {
+      Object.defineProperty(process, "platform", { value: "darwin" });
+
+      const appDir = path.join(tempDir, "Paseo.app", "Contents", "Resources", "node_modules", "@getpaseo", "server");
+      const appAsar = path.join(tempDir, "Paseo.app", "Contents", "Resources", "app.asar");
+      fs.mkdirSync(appDir, { recursive: true });
+      fs.writeFileSync(appAsar, "dummy asar");
+
+      const result = await ensurePaseoIntegration({
+        targetPaths: [appDir],
+        targetAsarPaths: [appAsar],
+      });
+
+      expect(result.skippedPaths).toBeDefined();
+      expect(result.skippedPaths).toContain(appDir);
+      expect(result.skippedPaths).toContain(appAsar);
+      expect(result.patchedPaths).toHaveLength(0);
+      expect(result.patchedAsarPaths).toHaveLength(0);
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform });
+    }
+  });
+
+  it("should restore asar archives from .bak backup using restorePaseoIntegration", async () => {
+    const mockAsar = path.join(tempDir, "app.asar");
+    const mockBackup = `${mockAsar}.bak`;
+    fs.writeFileSync(mockBackup, "ORIGINAL_BACKUP_CONTENT");
+    fs.writeFileSync(mockAsar, "MODIFIED_PATCHED_CONTENT");
+
+    process.env.PASEO_ASAR_PATH = mockAsar;
+    try {
+      const res = await restorePaseoIntegration();
+      expect(res.restored).toContain(path.resolve(mockAsar));
+      expect(fs.readFileSync(mockAsar, "utf-8")).toBe("ORIGINAL_BACKUP_CONTENT");
+    } finally {
+      delete process.env.PASEO_ASAR_PATH;
+    }
   });
 });
