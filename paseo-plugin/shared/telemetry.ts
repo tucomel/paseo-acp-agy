@@ -68,7 +68,7 @@ export const TelemetryResponseSchema = z.object({
 export type TelemetryResponse = z.infer<typeof TelemetryResponseSchema>;
 
 export const agyTelemetryGet = defineRpc({
-  name: "agyTelemetry.get",
+  name: "agy-telemetry.get",
   input: z.object({
     agentId: z.string(),
     forceQuota: z.boolean().optional(),
