@@ -573,4 +573,93 @@ class ACPAgentSession {
       delete process.env.PASEO_ASAR_PATH;
     }
   });
+
+  it("emits valid @getpaseo/protocol UsageTone values ('danger' / 'warning') and skips duplicate source when antigravity-telemetry plugin is active", () => {
+    const ts = generateAntigravityPluginUsageTs();
+    expect(ts).toContain('if (usedPct >= 90) return "danger"');
+    expect(ts).toContain('if (usedPct >= 75) return "warning"');
+    expect(ts).not.toContain('return "critical"');
+    expect(ts).not.toContain('return "warn"');
+    expect(ts).toContain("isStandaloneTelemetryPluginEnabled()");
+  });
+
+  it("patches Paseo 0.13.0+ usageSession() where !this.usageProvider blocks generic ACP providers", () => {
+    const pluginDir = path.join(tempDir, "dist", "server", "builtin-plugins", "antigravity-provider");
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, "index.server.js"),
+      `export default function contribute(server) {\n  return () => {};\n}\n`,
+      "utf-8"
+    );
+
+    const agentDir = path.join(tempDir, "dist", "server", "server", "agent", "providers");
+    fs.mkdirSync(agentDir, { recursive: true });
+    const acpAgentPath = path.join(agentDir, "acp-agent.js");
+    fs.writeFileSync(
+      acpAgentPath,
+      `export function mapACPUsage(usage) {
+    if (!usage) return undefined;
+    return { inputTokens: usage.inputTokens };
+}
+class ACPAgentSession {
+    usageSession() {
+        if (this.closed || !this.usageProvider) {
+            return null;
+        }
+        return {
+            provider: this.usageProvider,
+            model: this.currentModel ?? this.config.model,
+            env: this.launchEnv ?? {},
+            sessionKey: this.usageSessionKey,
+        };
+    }
+    handleUsageUpdate(update) {
+        void update;
+    }
+}
+`,
+      "utf-8"
+    );
+
+    expect(isPaseoServerPatched(tempDir)).toBe(false);
+    const res = patchPaseoServer(tempDir);
+    expect(res.success).toBe(true);
+
+    const updatedAcp = fs.readFileSync(acpAgentPath, "utf-8");
+    expect(updatedAcp).not.toContain("!this.usageProvider");
+    expect(updatedAcp).toContain("provider: this.usageProvider ?? this.provider");
+    expect(isPaseoServerPatched(tempDir)).toBe(true);
+  });
+
+  it("refuses to downgrade a newer Paseo app.asar from a stale version-mismatched .bak archive", async () => {
+    const newSrcDir = path.join(tempDir, "paseo-0.13.0-src");
+    fs.mkdirSync(newSrcDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(newSrcDir, "package.json"),
+      JSON.stringify({ name: "@getpaseo/desktop", version: "0.13.0" }),
+      "utf-8"
+    );
+
+    const oldSrcDir = path.join(tempDir, "paseo-0.10.3-src");
+    fs.mkdirSync(oldSrcDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(oldSrcDir, "package.json"),
+      JSON.stringify({ name: "@getpaseo/desktop", version: "0.10.3" }),
+      "utf-8"
+    );
+
+    const targetAsar = path.join(tempDir, "app.asar");
+    const staleBackupAsar = `${targetAsar}.bak`;
+    await createPackage(newSrcDir, targetAsar);
+    await createPackage(oldSrcDir, staleBackupAsar);
+
+    process.env.PASEO_ASAR_PATH = targetAsar;
+    try {
+      const res = await restorePaseoIntegration();
+      expect(res.restored).toHaveLength(0);
+      expect(res.errors.some((e) => e.includes("Refusing to restore") && e.includes("v0.13.0") && e.includes("v0.10.3"))).toBe(true);
+    } finally {
+      delete process.env.PASEO_ASAR_PATH;
+    }
+  });
 });

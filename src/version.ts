@@ -72,7 +72,14 @@ function resolveAgyInfo(): { version: string; binaryPath: string } {
               path.join(homeDir, ".local", "bin", "agy.cmd"),
               path.join(homeDir, ".local", "bin", "agy.bat"),
             ]
-          : [path.join(homeDir, ".local", "bin", "agy")];
+          : [
+              path.join(homeDir, ".local", "bin", "agy"),
+              "/opt/homebrew/bin/agy",
+              "/usr/local/bin/agy",
+              "/usr/bin/agy",
+              path.join(homeDir, ".antigravity", "bin", "agy"),
+              path.join(homeDir, ".gemini", "antigravity-cli", "bin", "agy"),
+            ];
 
       for (const cand of candidates) {
         if (fs.existsSync(cand)) {

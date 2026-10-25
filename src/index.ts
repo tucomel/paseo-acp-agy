@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { ACPServer } from "./acp-server.js";
 import { logger } from "./logger.js";
@@ -18,6 +20,12 @@ import { resolveDefaultAgyBinary, isWindowsBatchScript } from "./antigravity-pro
 import { parseAgyQuotaOutput } from "./protocol.js";
 
 const args = process.argv.slice(2);
+const bundledPluginDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "paseo-plugin");
+
+if (args.includes("plugin-path") || args.includes("--plugin-path")) {
+  process.stdout.write(`${bundledPluginDir}\n`);
+  process.exit(0);
+}
 
 if (args.includes("--version") || args.includes("-v")) {
   if (args.includes("--json")) {
@@ -42,12 +50,14 @@ Commands:
   setup, patch   Configure and integrate Antigravity telemetry with Paseo
   doctor         Diagnose Antigravity binary, quota provider, and Paseo status
   restore        Restore original Paseo files from backup (.bak)
+  plugin-path    Print path to the update-proof Paseo telemetry plugin directory
 
 Options:
   --acp             Start ACP server over stdio (default)
   --setup           Integrate Antigravity with local Paseo server installation
   --doctor          Run environment, binary, and telemetry diagnostics
   --restore         Restore original Paseo files from backup
+  --plugin-path     Print bundled Paseo plugin directory for 'paseo plugin install'
   --force-macos-app Force patching inside macOS .app bundle (re-signs with ad-hoc)
   --skip-naration   Drop leading narration-only assistant chunks (e.g. 'I will...')
   --skip-narration  Alias for --skip-naration
@@ -148,6 +158,24 @@ if (args.includes("doctor") || args.includes("--doctor")) {
   process.stdout.write("\n3. Paseo Installation Targets:\n");
   const serverPaths = findPaseoServerInstallations();
   const asarPaths = findPaseoAsarPaths();
+  let telemetryPluginEnabled = false;
+  try {
+    const paseoHome =
+      process.env.PASEO_HOME || path.join(process.env.HOME || process.env.USERPROFILE || "", ".paseo");
+    const cfgPath = path.join(paseoHome, "config.json");
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+      if (cfg?.pluginsEnabled === true && cfg?.plugins) {
+        const p = cfg.plugins["antigravity-telemetry"];
+        if (p && p.enabled !== false) {
+          telemetryPluginEnabled = true;
+        }
+      }
+    }
+  } catch {}
+  process.stdout.write(
+    `  - [Plugin] antigravity-telemetry -> ${telemetryPluginEnabled ? "[ENABLED]" : "[NOT INSTALLED]"}\n`
+  );
   const totalFound = serverPaths.length + asarPaths.length;
 
   if (totalFound === 0) {
@@ -194,19 +222,20 @@ if (args.includes("doctor") || args.includes("--doctor")) {
     process.stdout.write("    Action: Install Antigravity CLI or set AGY_BIN_PATH environment variable.\n");
   }
 
-  if (totalFound === 0) {
+  if (totalFound === 0 && !telemetryPluginEnabled) {
     hasIssue = true;
     process.stdout.write("  - No Paseo installations found.\n");
     process.stdout.write("    Action: Set PASEO_SERVER_PATH or PASEO_ASAR_PATH to your Paseo install directory if located elsewhere.\n");
-  } else if (unpatchedCount > 0) {
+  } else if (unpatchedCount > 0 && !telemetryPluginEnabled) {
     hasIssue = true;
-    if (paseoRunning) {
-      process.stdout.write(`  - Found ${unpatchedCount} unpatched Paseo target(s), but Paseo is currently running.\n`);
-      process.stdout.write("    Action: Close Paseo completely (Stop-Process -Name \"Paseo\" -Force), then run:\n");
+    process.stdout.write(`  - Found ${unpatchedCount} unpatched Paseo target(s) and 'antigravity-telemetry' plugin is not yet installed.\n`);
+    process.stdout.write("    Recommended update-proof action (survives Paseo updates without touching .app signatures):\n");
+    process.stdout.write(`      paseo plugin install "${bundledPluginDir}"\n`);
+    if (isWin) {
+      process.stdout.write("    Or to patch standalone Paseo after closing it (Stop-Process -Name \"Paseo\" -Force):\n");
       process.stdout.write("      npx -y paseo-acp-agy setup\n");
     } else {
-      process.stdout.write(`  - Found ${unpatchedCount} unpatched Paseo target(s).\n`);
-      process.stdout.write("    Action: Run setup to patch Paseo for Antigravity telemetry:\n");
+      process.stdout.write("    Or for standalone @getpaseo/cli servers:\n");
       process.stdout.write("      npx -y paseo-acp-agy setup\n");
     }
   }
@@ -295,8 +324,9 @@ if (
           `\n🛡️  Preserved macOS Code Signature:\n` +
           `   Skipped ${res.skippedPaths.length} target(s) inside macOS .app bundle to protect official Apple Developer ID signature\n` +
           `   and prevent Gatekeeper "damaged app" warnings.\n` +
-          `   (Antigravity ACP runs standalone and does not require modifying Paseo.app).\n` +
-          `   If you specifically wish to patch the .app bundle, run with: paseo-acp-agy patch --force-macos-app\n\n`
+          `   Recommended update-proof telemetry setup (survives every Paseo update):\n` +
+          `     paseo plugin install "${bundledPluginDir}"\n` +
+          `   (Or if you specifically wish to patch the .app bundle: paseo-acp-agy patch --force-macos-app)\n\n`
         );
       }
 

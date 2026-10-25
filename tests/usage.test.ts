@@ -16,6 +16,7 @@ import {
 import { ACPServer } from "../src/acp-server.js";
 import { SessionManager } from "../src/session.js";
 import { SessionStore } from "../src/session-store.js";
+import { estimateReplayContextTokens } from "../src/transcript.js";
 
 function makeRpcHarness(manager: SessionManager) {
   const input = new PassThrough();
@@ -636,6 +637,95 @@ Gemini 4 Argon         Gemini 4 Argon Weekly Limit  95%   2026-10-24 16:27 UTC
       expect(loaded.usage.contextWindowMaxTokens).toBe(1_048_576);
       expect(loaded.usage.totalTokens).toBe(28_800_000);
       expect(loaded.usage.totalCostUsd).toBe(12.8);
+    });
+
+    it("emits post-sendSuccess usage_update notifications so unpatched Paseo 0.10..0.13+ retains context wheel occupancy", async () => {
+      const store = new SessionStore(path.join(tempDir, "post-turn-usage"));
+      const manager = new SessionManager({ store });
+      const session = manager.createSession({ cwd: tempDir, model: "gemini-3.8-flash" });
+
+      vi.spyOn(session.process, "sendPrompt").mockResolvedValue({
+        event: "result",
+        result: {
+          conversation_id: session.id,
+          status: "SUCCESS",
+          response: "ok",
+          usage: { input_tokens: 48_000, output_tokens: 2_000, cache_read_tokens: 10_000 },
+        },
+      });
+
+      const harness = makeRpcHarness(manager);
+      harness.send({
+        jsonrpc: "2.0",
+        id: 77,
+        method: "session/prompt",
+        params: { sessionId: session.id, prompt: "hello" },
+      });
+
+      await harness.waitForResponse(77);
+      const responseIdx = harness.messages.findIndex((m) => m.id === 77);
+      expect(responseIdx).toBeGreaterThanOrEqual(0);
+
+      // Wait for the post-response scheduled burst (25ms)
+      await new Promise((r) => setTimeout(r, 60));
+
+      const afterResponseUpdates = harness.messages
+        .slice(responseIdx + 1)
+        .filter((m) => m.params?.update?.sessionUpdate === "usage_update");
+
+      expect(afterResponseUpdates.length).toBeGreaterThan(0);
+      expect(afterResponseUpdates[0].params.update.size).toBe(1_048_576);
+      expect(afterResponseUpdates[0].params.update.used).toBe(50_000);
+
+      await harness.server.stop();
+    });
+
+    it("emits usage_update and clamps contextWindowUsedTokens when session/set_mode or model changes", async () => {
+      const store = new SessionStore(path.join(tempDir, "override-usage"));
+      const manager = new SessionManager({ store });
+      const session = manager.createSession({ cwd: tempDir, model: "gemini-3.8-flash" });
+      session.recordTurnUsage({ input_tokens: 300_000, output_tokens: 5_000 });
+      expect(session.usage.contextWindowUsedTokens).toBe(305_000);
+
+      // Switching to a 200k Claude model must clamp used tokens <= 200k
+      session.setModel("claude-sonnet-4-6");
+      expect(session.usage.contextWindowMaxTokens).toBe(200_000);
+      expect(session.usage.contextWindowUsedTokens).toBe(200_000);
+
+      const harness = makeRpcHarness(manager);
+      harness.send({
+        jsonrpc: "2.0",
+        id: 88,
+        method: "session/set_mode",
+        params: { sessionId: session.id, modeId: "plan" },
+      });
+      await harness.waitForResponse(88);
+
+      const modeUsage = harness.messages.find(
+        (m) => m.params?.update?.sessionUpdate === "usage_update"
+      );
+      expect(modeUsage).toBeDefined();
+      expect(modeUsage.params.update.size).toBe(200_000);
+      expect(modeUsage.params.update.used).toBe(200_000);
+
+      await harness.server.stop();
+    });
+
+    it("estimates non-zero context window tokens from replayed transcript when prior ACP usage is absent", () => {
+      const estimated = estimateReplayContextTokens([
+        { type: "user_message", text: "Hello ".repeat(400) },
+        { type: "agent_message", text: "Response ".repeat(800) },
+      ]);
+      expect(estimated).toBeGreaterThan(4_000);
+
+      const store = new SessionStore(path.join(tempDir, "seed-usage"));
+      const manager = new SessionManager({ store });
+      const session = manager.createSession({ cwd: tempDir, model: "gemini-3.8-flash" });
+      expect(session.usage.contextWindowUsedTokens).toBe(0);
+
+      session.seedEstimatedContextUsage(estimated);
+      expect(session.usage.contextWindowUsedTokens).toBe(estimated);
+      expect(session.usage.totalTokens).toBe(0);
     });
   });
 });

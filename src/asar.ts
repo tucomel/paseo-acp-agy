@@ -79,6 +79,37 @@ export function listPackage(archivePath: string): string[] {
 }
 
 /**
+ * Reads a single UTF-8 text file directly from an ASAR archive without extracting
+ * the entire archive to disk. Returns null if the archive or entry cannot be read.
+ */
+export function readFileFromPackage(archivePath: string, relPath: string): string | null {
+  try {
+    const { header, dataBaseOffset } = readArchiveHeader(archivePath);
+    const parts = relPath.replace(/^\/+/, "").split("/").filter(Boolean);
+    let node: AsarNode | undefined = header;
+    for (const part of parts) {
+      node = node?.files?.[part];
+      if (!node) return null;
+    }
+    if (node.unpacked || node.size === undefined || node.offset === undefined) {
+      return null;
+    }
+    if (node.size === 0) return "";
+    const fileOffset = dataBaseOffset + parseInt(node.offset, 10);
+    const fd = fs.openSync(archivePath, "r");
+    try {
+      const buf = Buffer.alloc(node.size);
+      const bytesRead = fs.readSync(fd, buf, 0, node.size, fileOffset);
+      return buf.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Pure TypeScript, zero-dependency ASAR archive extractor.
  * Compatible with all Node.js versions (Node 18, 20, 22, 24+) across Windows, macOS, and Linux.
  */

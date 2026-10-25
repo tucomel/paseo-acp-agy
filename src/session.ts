@@ -152,9 +152,27 @@ export class Session {
 
   setModel(model: string) {
     this.model = model;
-    this.usage.contextWindowMaxTokens = getModelContextWindow(model);
+    const maxTokens = getModelContextWindow(model);
+    this.usage.contextWindowMaxTokens = maxTokens;
+    if (this.usage.contextWindowUsedTokens > maxTokens) {
+      this.usage.contextWindowUsedTokens = Math.min(this.usage.contextWindowUsedTokens, maxTokens);
+    }
     this.process.setModel(model);
     this.persist();
+  }
+
+  seedEstimatedContextUsage(estimatedTokens: number) {
+    if (
+      estimatedTokens > 0 &&
+      this.usage.contextWindowUsedTokens === 0 &&
+      this.usage.totalTokens === 0
+    ) {
+      this.usage.contextWindowUsedTokens = Math.min(
+        Math.round(estimatedTokens),
+        this.usage.contextWindowMaxTokens
+      );
+      this.persist();
+    }
   }
 
   setEffort(effort: string) {

@@ -92,23 +92,28 @@ To include `paseo-acp-agy` in Paseo's built-in provider store (`ACP_PROVIDER_CAT
 
 ## Plan Usage & Context Window Meter Setup
 
-To display the **Google Antigravity** quota breakdown in Paseo's `Settings -> Usage` (Plan usage) and activate the real-time context-window meter ("bolinha") in the chat composer:
+### Recommended (Paseo >= 0.11.0): Official Update-Proof Paseo Plugin
+
+Install the bundled **`antigravity-telemetry`** Paseo plugin once. It registers in `~/.paseo/config.json` and survives all future `Paseo.app`, Web, iPhone, and CLI updates without modifying signed `.app` bundles:
 
 ```bash
-npx -y paseo-acp-agy setup
+paseo plugin install "$(paseo-acp-agy --plugin-path)"
 ```
 
-Or if installed globally:
+What this provides across Desktop, Web, and Mobile (iPhone):
+- Native **Google Antigravity** quota gauges in Paseo's Sidebar and `Settings -> Usage` (`5h` window, weekly pool, credits)
+- Live per-agent **Composer Pill** (`$cost · ctx X% · 5h Y%`) with interactive Popover / Mobile Bottom Sheet
+- Dedicated **Antigravity Telemetry** workspace panel, Command Center action, and `/agy-telemetry` slash command
+- Combined with native ACP `usage_update` notifications so Paseo's built-in `ContextWindowMeter` ("bolinha") stays deterministic on every session open, resume, model switch, and turn completion
+
+### Standalone Server Patch (Optional, Linux / Paseo < 0.11.0)
+
+For standalone `@getpaseo/cli` servers where you prefer direct server-level patching:
+
 ```bash
 paseo-acp-agy setup
-```
-
-Then restart your Paseo app or daemon:
-```bash
 paseo daemon restart
 ```
-
-> **Note**: `paseo-acp-agy` also checks and auto-configures your local Paseo server automatically whenever it launches via `--acp`. Running `setup` manually ensures your existing daemon instance picks up the telemetry hooks immediately upon restart.
 
 ---
 

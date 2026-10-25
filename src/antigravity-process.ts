@@ -147,8 +147,20 @@ export function resolveDefaultAgyBinary(force = false): string {
           }
         }
       } else {
-        const localPath = path.join(home, ".local", "bin", "agy");
-        if (fs.existsSync(localPath)) resolved = localPath;
+        const posixCandidates = [
+          path.join(home, ".local", "bin", "agy"),
+          "/opt/homebrew/bin/agy",
+          "/usr/local/bin/agy",
+          "/usr/bin/agy",
+          path.join(home, ".antigravity", "bin", "agy"),
+          path.join(home, ".gemini", "antigravity-cli", "bin", "agy"),
+        ];
+        for (const cand of posixCandidates) {
+          if (fs.existsSync(cand)) {
+            resolved = cand;
+            break;
+          }
+        }
       }
     }
   }

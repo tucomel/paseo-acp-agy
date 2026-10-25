@@ -178,3 +178,31 @@ export function loadConversationTranscript(conversationId: string): ReplayItem[]
     return [];
   }
 }
+
+/**
+ * Estimates context window token occupancy from replayed transcript items
+ * when loading/resuming a native Antigravity conversation without prior ACP usage state.
+ */
+export function estimateReplayContextTokens(items: readonly ReplayItem[]): number {
+  if (!items || items.length === 0) return 0;
+  let totalChars = 0;
+  for (const item of items) {
+    if (item.text) {
+      totalChars += item.text.length;
+    }
+    if (item.title) {
+      totalChars += item.title.length;
+    }
+    if (item.rawInput) {
+      try {
+        totalChars += JSON.stringify(item.rawInput).length;
+      } catch {}
+    }
+    if (item.rawOutput) {
+      totalChars += item.rawOutput.length;
+    }
+  }
+  if (totalChars <= 0) return 0;
+  // ~4 chars per token plus ~4,000 tokens base system/tool schema prompt footprint
+  return 4_000 + Math.ceil(totalChars / 4);
+}

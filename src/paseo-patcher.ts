@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { logger } from "./logger.js";
-import { extractAll, createPackage, listPackage } from "./asar.js";
+import { extractAll, createPackage, listPackage, readFileFromPackage } from "./asar.js";
 
 export interface PatchResult {
   found: boolean;
@@ -342,8 +342,26 @@ function resolveAgyBinary() {
                 }
             }
         } else {
-            const localPath = path.join(home, ".local", "bin", "agy");
-            if (fs.existsSync(localPath)) resolved = localPath;
+            const posixCandidates = [
+                path.join(home, ".local", "bin", "agy"),
+                "/opt/homebrew/bin/agy",
+                "/usr/local/bin/agy",
+                "/usr/bin/agy",
+                path.join(home, ".antigravity", "bin", "agy"),
+                path.join(home, ".gemini", "antigravity-cli", "bin", "agy"),
+            ];
+            for (const cand of posixCandidates) {
+                if (fs.existsSync(cand)) {
+                    resolved = cand;
+                    break;
+                }
+            }
+            if (resolved === "agy") {
+                try {
+                    const out = execFileSync("which", ["agy"], { encoding: "utf-8", timeout: 2000 }).trim();
+                    if (out && fs.existsSync(out)) resolved = out;
+                } catch {}
+            }
         }
     }
 
@@ -398,14 +416,21 @@ export class AntigravityQuotaProvider {
                 path.join(programFiles, "agy", "bin"),
                 path.join(programFilesX86, "Antigravity", "bin"),
                 path.join(programFilesX86, "agy", "bin"),
-            ].filter(p => fs.existsSync(p)) : [];
+            ].filter(p => fs.existsSync(p)) : [
+                home ? path.join(home, ".local", "bin") : "",
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                home ? path.join(home, ".antigravity", "bin") : "",
+                home ? path.join(home, ".gemini", "antigravity-cli", "bin") : "",
+            ].filter(p => p && fs.existsSync(p));
 
             const env = { ...process.env };
             if (extraPaths.length > 0) {
+                const sep = path.delimiter;
                 const currentPath = env.PATH || env.Path || "";
-                const newPath = (currentPath ? currentPath + ";" : "") + extraPaths.join(";");
+                const newPath = (currentPath ? currentPath + sep : "") + extraPaths.join(sep);
                 env.PATH = newPath;
-                env.Path = newPath;
+                if (isWin) env.Path = newPath;
             }
 
             let rawUsageOut = "";
@@ -660,9 +685,11 @@ function resolveAgyBinary() {
     } else {
         const posixCandidates = [
             path.join(home, ".local", "bin", "agy"),
+            "/opt/homebrew/bin/agy",
             "/usr/local/bin/agy",
             "/usr/bin/agy",
-            "/opt/homebrew/bin/agy",
+            path.join(home, ".antigravity", "bin", "agy"),
+            path.join(home, ".gemini", "antigravity-cli", "bin", "agy"),
         ];
         for (const cand of posixCandidates) {
             if (fs.existsSync(cand)) {
@@ -690,9 +717,22 @@ function resolveAgyBinary() {
 }
 
 function toneFromUsedPct(usedPct) {
-    if (usedPct >= 90) return "critical";
-    if (usedPct >= 75) return "warn";
+    if (usedPct >= 90) return "danger";
+    if (usedPct >= 75) return "warning";
     return "ok";
+}
+
+function isStandaloneTelemetryPluginEnabled() {
+    try {
+        const paseoHome = process.env.PASEO_HOME || path.join(os.homedir(), ".paseo");
+        const cfgPath = path.join(paseoHome, "config.json");
+        if (!fs.existsSync(cfgPath)) return false;
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+        const entry = cfg && cfg.plugins && cfg.plugins["antigravity-telemetry"];
+        return Boolean(entry && entry.enabled !== false);
+    } catch {
+        return false;
+    }
 }
 
 export async function fetchAntigravityUsage() {
@@ -705,12 +745,26 @@ export async function fetchAntigravityUsage() {
         const bin = resolveAgyBinary();
         const isWin = process.platform === "win32";
         const isBatch = isWin && /\\.(cmd|bat)$/i.test(bin);
+        const home = os.homedir();
+        const extraPosixPaths = !isWin ? [
+            home ? path.join(home, ".local", "bin") : "",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            home ? path.join(home, ".antigravity", "bin") : "",
+            home ? path.join(home, ".gemini", "antigravity-cli", "bin") : "",
+        ].filter(p => p && fs.existsSync(p)) : [];
+        const env = { ...process.env };
+        if (extraPosixPaths.length > 0) {
+            const sep = path.delimiter;
+            env.PATH = (env.PATH ? env.PATH + sep : "") + extraPosixPaths.join(sep);
+        }
 
         let usageOut = "";
         try {
             usageOut = execFileSync(bin, ["--print-timeout", "24h", "--print", "/usage"], {
                 encoding: "utf-8",
                 timeout: 30000,
+                env,
                 windowsHide: true,
                 shell: isBatch,
             });
@@ -724,6 +778,7 @@ export async function fetchAntigravityUsage() {
             creditsOut = execFileSync(bin, ["--print-timeout", "24h", "--print", "/credits"], {
                 encoding: "utf-8",
                 timeout: 6000,
+                env,
                 windowsHide: true,
                 shell: isBatch,
             });
@@ -881,6 +936,7 @@ export async function fetchAntigravityUsage() {
 
 export function registerAntigravityUsageSource(server) {
     if (!server || typeof server.registerUsageSource !== "function") return;
+    if (isStandaloneTelemetryPluginEnabled()) return;
     try {
         server.registerUsageSource({
             id: "antigravity",
@@ -1221,6 +1277,16 @@ ${braceIndent}}`;
             acpModified = true;
           }
         }
+      } else if (acpCode.includes("!this.usageProvider")) {
+        // Paseo 0.13.0+ defines usageSession() with `if (this.closed || !this.usageProvider) return null;`
+        // while GenericACPAgentClient (`extends: "acp"`) leaves `this.usageProvider = undefined`.
+        const nextCode = acpCode
+          .replace(/if\s*\(\s*this\.closed\s*\|\|\s*!this\.usageProvider\s*\)/g, "if (this.closed)")
+          .replace(/provider:\s*this\.usageProvider\b/g, "provider: this.usageProvider ?? this.provider");
+        if (nextCode !== acpCode) {
+          acpCode = nextCode;
+          acpModified = true;
+        }
       }
 
       // Patch mapPermissionRequest for native QuestionFormCard support in Paseo UI
@@ -1494,8 +1560,9 @@ export async function patchPaseoAsar(
 
     changes.push(...patchResult.changes);
 
-    // Create backup if not already present.
+    // Create backup if not already present (or refresh if backup is from a stale Paseo version).
     // On macOS, never write backup inside .app bundle (e.g. app.asar.bak) because it breaks code signing seals.
+    const currentVersion = resolveTargetPaseoVersion(asarPath);
     let backupPath: string;
     if (process.platform === "darwin" && asarPath.includes(".app")) {
       const backupDir = path.join(os.homedir(), ".paseo", "backups");
@@ -1503,6 +1570,15 @@ export async function patchPaseoAsar(
         fs.mkdirSync(backupDir, { recursive: true });
       }
       backupPath = path.join(backupDir, "app.asar.bak");
+      if (currentVersion) {
+        const versionedBackup = path.join(backupDir, `app.asar.${currentVersion}.bak`);
+        if (!fs.existsSync(versionedBackup)) {
+          try {
+            fs.copyFileSync(asarPath, versionedBackup);
+            changes.push(`Backed up versioned asar to ${versionedBackup}`);
+          } catch {}
+        }
+      }
       // Clean up any orphan backup inside the .app bundle from previous runs
       const orphanBak = `${asarPath}.bak`;
       if (fs.existsSync(orphanBak)) {
@@ -1514,7 +1590,12 @@ export async function patchPaseoAsar(
       backupPath = `${asarPath}.bak`;
     }
 
-    if (!fs.existsSync(backupPath)) {
+    const existingBackupVer = fs.existsSync(backupPath) ? resolveAsarArchiveVersion(backupPath) : null;
+    const needsFreshBackup =
+      !fs.existsSync(backupPath) ||
+      Boolean(currentVersion && existingBackupVer && currentVersion !== existingBackupVer);
+
+    if (needsFreshBackup) {
       try {
         fs.copyFileSync(asarPath, backupPath);
         changes.push(`Backed up original asar to ${backupPath}`);
@@ -1667,7 +1748,54 @@ export async function ensurePaseoIntegration(options?: {
 }
 
 /**
- * Restores original unpatched Paseo files from backup (.bak) archives.
+ * Reads the Paseo version embedded inside an ASAR archive's package.json.
+ */
+export function resolveAsarArchiveVersion(archivePath: string): string | null {
+  if (!fs.existsSync(archivePath)) return null;
+  for (const rel of [
+    "package.json",
+    "node_modules/@getpaseo/server/package.json",
+    "dist/node_modules/@getpaseo/server/package.json",
+  ]) {
+    const raw = readFileFromPackage(archivePath, rel);
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw) as { version?: unknown };
+      if (typeof parsed.version === "string" && parsed.version.trim()) {
+        return parsed.version.trim();
+      }
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Resolves the authoritative Paseo version of a target app.asar installation,
+ * preferring macOS bundle Info.plist (CFBundleShortVersionString) when inside an .app bundle.
+ */
+export function resolveTargetPaseoVersion(asarPath: string): string | null {
+  if (asarPath.includes(".app")) {
+    const appIndex = asarPath.indexOf(".app");
+    const appBundlePath = asarPath.slice(0, appIndex + 4);
+    const infoPlistPath = path.join(appBundlePath, "Contents", "Info.plist");
+    if (fs.existsSync(infoPlistPath)) {
+      try {
+        const plist = fs.readFileSync(infoPlistPath, "utf-8");
+        const m = plist.match(
+          /<key>\s*CFBundleShortVersionString\s*<\/key>\s*<string>\s*([^<\s]+)\s*<\/string>/i
+        );
+        if (m && m[1]) {
+          return m[1].trim();
+        }
+      } catch {}
+    }
+  }
+  return resolveAsarArchiveVersion(asarPath);
+}
+
+/**
+ * Restores original unpatched Paseo files from backup (.bak) archives,
+ * enforcing strict version matching so an older backup can never downgrade a newer Paseo app.
  */
 export async function restorePaseoIntegration(): Promise<{
   restored: string[];
@@ -1676,18 +1804,42 @@ export async function restorePaseoIntegration(): Promise<{
   const restored: string[] = [];
   const errors: string[] = [];
   const home = os.homedir();
-  const macBackup = path.join(home, ".paseo", "backups", "app.asar.bak");
+  const backupDir = path.join(home, ".paseo", "backups");
+  const macBackup = path.join(backupDir, "app.asar.bak");
   const asarCandidates = findPaseoAsarPaths();
 
   for (const asarPath of asarCandidates) {
+    const targetVersion = resolveTargetPaseoVersion(asarPath);
     let backupFile: string | null = null;
-    if (process.platform === "darwin" && asarPath.includes(".app") && fs.existsSync(macBackup)) {
-      backupFile = macBackup;
+
+    if (process.platform === "darwin" && asarPath.includes(".app")) {
+      const versionedCandidate = targetVersion
+        ? path.join(backupDir, `app.asar.${targetVersion}.bak`)
+        : null;
+      if (versionedCandidate && fs.existsSync(versionedCandidate)) {
+        backupFile = versionedCandidate;
+      } else if (fs.existsSync(macBackup)) {
+        backupFile = macBackup;
+      }
     } else if (fs.existsSync(`${asarPath}.bak`)) {
       backupFile = `${asarPath}.bak`;
     }
 
     if (backupFile) {
+      const backupVersion = resolveAsarArchiveVersion(backupFile);
+      if (targetVersion && backupVersion && targetVersion !== backupVersion) {
+        errors.push(
+          `Refusing to restore ${asarPath} (v${targetVersion}) from stale backup ${backupFile} (v${backupVersion}) to prevent version downgrade`
+        );
+        continue;
+      }
+      if (process.platform === "darwin" && asarPath.includes(".app") && targetVersion && !backupVersion) {
+        errors.push(
+          `Refusing to restore ${asarPath} (v${targetVersion}) from unverified backup ${backupFile}`
+        );
+        continue;
+      }
+
       try {
         fs.copyFileSync(backupFile, asarPath);
         restored.push(asarPath);
@@ -1749,6 +1901,8 @@ export function isPaseoServerPatched(serverDir: string): boolean {
         path.join(pluginDir, "server", "usage.js"),
       ].find((f) => fs.existsSync(f));
       if (!usageFile) return false;
+      const usageContent = fs.readFileSync(usageFile, "utf-8");
+      if (usageContent.includes('return "critical"')) return false;
 
       const indexFile = [
         path.join(pluginDir, "index.server.ts"),
@@ -1850,7 +2004,7 @@ export function isPaseoServerPatched(serverDir: string): boolean {
       if (!content.includes("this.currentTurnUsage =") || !content.includes("contextWindowMaxTokens")) {
         return false;
       }
-      if (pluginDir && !content.includes("usageSession()")) {
+      if (pluginDir && (!content.includes("usageSession()") || content.includes("!this.usageProvider"))) {
         return false;
       }
     }

@@ -28,7 +28,7 @@ import { SessionManager, Session } from "./session.js";
 import { executeSlashCommand, AVAILABLE_SLASH_COMMANDS } from "./slash-commands.js";
 import { getShortVersion } from "./version.js";
 import { resolveDefaultAgyBinary } from "./antigravity-process.js";
-import { loadConversationTranscript } from "./transcript.js";
+import { loadConversationTranscript, estimateReplayContextTokens } from "./transcript.js";
 import { normalizeToolCall, normalizeToolResult, extractPlanEntries } from "./tool-formatter.js";
 import { McpBridge, McpServerConfig } from "./mcp-bridge.js";
 
@@ -56,6 +56,7 @@ export class ACPServer extends EventEmitter {
     resolve: (value: any) => void;
     reject: (reason?: any) => void;
   }>();
+  private usagePublishTimers = new Map<string, Set<NodeJS.Timeout>>();
   private nextRequestId = 1;
 
   constructor(options: {
@@ -177,6 +178,53 @@ export class ACPServer extends EventEmitter {
         contextWindowUsedTokens: usedTokens,
       },
     });
+  }
+
+  private clearUsagePublishTimers(sessionId?: string) {
+    if (sessionId !== undefined) {
+      const timers = this.usagePublishTimers.get(sessionId);
+      if (timers) {
+        for (const t of timers) clearTimeout(t);
+        this.usagePublishTimers.delete(sessionId);
+      }
+      return;
+    }
+    for (const timers of this.usagePublishTimers.values()) {
+      for (const t of timers) clearTimeout(t);
+    }
+    this.usagePublishTimers.clear();
+  }
+
+  /**
+   * Schedules coalesced, unref'd usage_update notifications so ACP hosts (like Paseo)
+   * deterministically receive context window & session telemetry:
+   * - after awaiting newSession/loadSession + applyConfiguredOverrides() + session.subscribe()
+   * - after turn_completed overwrites or initializes currentTurnUsage in Paseo 0.10..0.13+
+   */
+  private scheduleUsagePublishBurst(sessionId: string, delaysMs: readonly number[]) {
+    this.clearUsagePublishTimers(sessionId);
+    if (!this.isRunning || delaysMs.length === 0) return;
+
+    const timers = new Set<NodeJS.Timeout>();
+    this.usagePublishTimers.set(sessionId, timers);
+
+    for (const delayMs of delaysMs) {
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        if (timers.size === 0) {
+          this.usagePublishTimers.delete(sessionId);
+        }
+        if (!this.isRunning) return;
+        const current = this.sessionManager.getSession(sessionId);
+        if (current) {
+          this.publishUsageUpdate(current);
+        }
+      }, delayMs);
+      if (typeof timer.unref === "function") {
+        timer.unref();
+      }
+      timers.add(timer);
+    }
   }
 
   private async sessionState(session: Session, forceModels = false) {
@@ -327,17 +375,9 @@ export class ACPServer extends EventEmitter {
             this.sendSuccess(id, await this.sessionState(session, true));
             this.publishCommands(session.id);
             this.publishUsageUpdate(session);
-            // Re-publish usage after ACPAgent completes awaiting newSession and stores this.sessionId
-            setTimeout(() => {
-              if (this.sessionManager.getSession(session.id)) {
-                this.publishUsageUpdate(session);
-              }
-            }, 150);
-            setTimeout(() => {
-              if (this.sessionManager.getSession(session.id)) {
-                this.publishUsageUpdate(session);
-              }
-            }, 500);
+            // Re-publish usage across startup window so ACPAgent receives it after
+            // awaiting newSession + applyConfiguredOverrides() + session.subscribe()
+            this.scheduleUsagePublishBurst(session.id, [120, 450, 1200, 2800]);
           }
           break;
         }
@@ -375,6 +415,9 @@ export class ACPServer extends EventEmitter {
                   if (firstUser && firstUser.text) {
                     session.setTitle(firstUser.text.slice(0, 80).replace(/\r?\n/g, " ").trim());
                   }
+                }
+                if (replayItems.length > 0) {
+                  session.seedEstimatedContextUsage(estimateReplayContextTokens(replayItems));
                 }
                 for (const item of replayItems) {
                   switch (item.type) {
@@ -443,12 +486,7 @@ export class ACPServer extends EventEmitter {
               this.sendSuccess(id, await this.sessionState(session));
               this.publishCommands(session.id);
               this.publishUsageUpdate(session);
-              const activeSession = session;
-              setTimeout(() => {
-                if (this.sessionManager.getSession(activeSession.id)) {
-                  this.publishUsageUpdate(activeSession);
-                }
-              }, 150);
+              this.scheduleUsagePublishBurst(session.id, [120, 450, 1200, 2800]);
             }
           } catch (err) {
             if (!isNotification) {
@@ -483,11 +521,25 @@ export class ACPServer extends EventEmitter {
               created = true;
             }
             await session.ensureReadyForResume();
+            const resumeConversationId = session.process.currentConversationId;
+            if (
+              resumeConversationId &&
+              session.usage.contextWindowUsedTokens === 0 &&
+              session.usage.totalTokens === 0
+            ) {
+              try {
+                const replayItems = await loadConversationTranscript(resumeConversationId);
+                if (replayItems.length > 0) {
+                  session.seedEstimatedContextUsage(estimateReplayContextTokens(replayItems));
+                }
+              } catch {}
+            }
 
             if (!isNotification) {
               this.sendSuccess(id, await this.sessionState(session));
               this.publishCommands(session.id);
               this.publishUsageUpdate(session);
+              this.scheduleUsagePublishBurst(session.id, [120, 450, 1200, 2800]);
             }
           } catch (err) {
             if (created || session) {
@@ -529,6 +581,17 @@ export class ACPServer extends EventEmitter {
             mode: sourceSession?.mode,
             permission: sourceSession?.permission,
             conversationId: sourceSession?.process.currentConversationId,
+            usage: sourceSession
+              ? {
+                  inputTokens: 0,
+                  outputTokens: 0,
+                  cachedInputTokens: 0,
+                  totalTokens: 0,
+                  totalCostUsd: 0,
+                  contextWindowUsedTokens: sourceSession.usage.contextWindowUsedTokens,
+                  contextWindowMaxTokens: sourceSession.usage.contextWindowMaxTokens,
+                }
+              : undefined,
             binaryPath: this.binaryPath,
           });
           if (sourceSession?.title) {
@@ -538,6 +601,7 @@ export class ACPServer extends EventEmitter {
             this.sendSuccess(id, await this.sessionState(newSession));
             this.publishCommands(newSession.id);
             this.publishUsageUpdate(newSession);
+            this.scheduleUsagePublishBurst(newSession.id, [120, 450, 1200]);
           }
           break;
         }
@@ -591,7 +655,11 @@ export class ACPServer extends EventEmitter {
                   },
                 });
               }
-              if (!isNotification) this.sendSuccess(id, { stopReason: "end_turn" });
+              this.publishUsageUpdate(session);
+              if (!isNotification) {
+                this.sendSuccess(id, { stopReason: "end_turn" });
+                this.scheduleUsagePublishBurst(session.id, [25, 150]);
+              }
               break;
             }
 
@@ -868,6 +936,7 @@ export class ACPServer extends EventEmitter {
               if (session.isCancelled) {
                 if (!isNotification) {
                   this.sendSuccess(id, { stopReason: "cancelled", usage: usagePayload });
+                  this.scheduleUsagePublishBurst(session.id, [25, 150]);
                 }
               } else if (resultEvent.result?.status === "ERROR") {
                 const errorMessage = resultEvent.result.error || "Turn failed with an error";
@@ -881,9 +950,11 @@ export class ACPServer extends EventEmitter {
                 });
                 if (!isNotification) {
                   this.sendSuccess(id, { stopReason: "refusal", usage: usagePayload });
+                  this.scheduleUsagePublishBurst(session.id, [25, 150]);
                 }
               } else if (!isNotification) {
                 this.sendSuccess(id, { stopReason: "end_turn", usage: usagePayload });
+                this.scheduleUsagePublishBurst(session.id, [25, 150]);
               }
             } catch (promptErr) {
               const errorMsg = (promptErr as Error).message || "Turn execution failed";
@@ -892,7 +963,10 @@ export class ACPServer extends EventEmitter {
                 errorMsg.includes("cancelled") ||
                 errorMsg.includes("Turn was cancelled")
               ) {
-                if (!isNotification) this.sendSuccess(id, { stopReason: "cancelled" });
+                if (!isNotification) {
+                  this.sendSuccess(id, { stopReason: "cancelled" });
+                  this.scheduleUsagePublishBurst(session.id, [25, 150]);
+                }
               } else {
                 logger.error("Error executing prompt turn", { error: errorMsg, sessionId });
                 this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
@@ -902,7 +976,10 @@ export class ACPServer extends EventEmitter {
                     content: { type: "text", text: `\n\n**Error:** ${errorMsg}\n` },
                   },
                 });
-                if (!isNotification) this.sendSuccess(id, { stopReason: "refusal" });
+                if (!isNotification) {
+                  this.sendSuccess(id, { stopReason: "refusal" });
+                  this.scheduleUsagePublishBurst(session.id, [25, 150]);
+                }
               }
             }
           } finally {
@@ -926,6 +1003,7 @@ export class ACPServer extends EventEmitter {
         case ACP_METHODS.SESSION_CLOSE:
         case ACP_METHODS.SESSION_CLOSE_ALIAS: {
           const sessionId = String(params.sessionId || "");
+          this.clearUsagePublishTimers(sessionId);
           await this.sessionManager.closeSession(sessionId);
           if (!isNotification) this.sendSuccess(id, {});
           break;
@@ -946,7 +1024,11 @@ export class ACPServer extends EventEmitter {
             break;
           }
           session.setMode(modeId);
-          if (!isNotification) this.sendSuccess(id, {});
+          if (!isNotification) {
+            this.sendSuccess(id, {});
+            this.publishUsageUpdate(session);
+            this.scheduleUsagePublishBurst(session.id, [80, 350, 1000]);
+          }
           break;
         }
 
@@ -992,7 +1074,11 @@ export class ACPServer extends EventEmitter {
             currentPermission: session.permission,
             availableModels: models,
           });
-          if (!isNotification) this.sendSuccess(id, { configOptions });
+          if (!isNotification) {
+            this.sendSuccess(id, { configOptions });
+            this.publishUsageUpdate(session);
+            this.scheduleUsagePublishBurst(session.id, [80, 350, 1000]);
+          }
           break;
         }
 
@@ -1057,7 +1143,11 @@ export class ACPServer extends EventEmitter {
             currentPermission: session.permission,
             availableModels: models,
           });
-          if (!isNotification) this.sendSuccess(id, { configOptions });
+          if (!isNotification) {
+            this.sendSuccess(id, { configOptions });
+            this.publishUsageUpdate(session);
+            this.scheduleUsagePublishBurst(session.id, [80, 350, 1000]);
+          }
           break;
         }
 
@@ -1083,6 +1173,7 @@ export class ACPServer extends EventEmitter {
   async stop(): Promise<void> {
     if (!this.isRunning) return;
     this.isRunning = false;
+    this.clearUsagePublishTimers();
     if (this.rl) {
       this.rl.close();
       this.rl = null;

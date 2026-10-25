@@ -1,0 +1,7 @@
+{
+  "id": "antigravity-telemetry",
+  "description": "Deterministic Antigravity quota windows, context wheel occupancy, and session token/cost telemetry across Paseo Desktop, Web, and Mobile.",
+  "requirements": {
+    "paseo": ">=0.10.3"
+  }
+}
