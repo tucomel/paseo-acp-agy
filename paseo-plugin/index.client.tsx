@@ -30,14 +30,19 @@ export default function contribute(client: PluginClientContext) {
   ).addSlashCommand;
 
   if (typeof maybeAddSlashCommand === "function") {
-    maybeAddSlashCommand.call(client, {
-      name: "agy-telemetry",
-      description: "Open Antigravity session usage, context wheel & quota panel",
-      context: "agent",
-      async onSubmit({ openPanel }) {
-        openPanel("telemetry");
-      },
-    });
+    try {
+      maybeAddSlashCommand.call(client, {
+        name: "agy-telemetry",
+        description: "Open Antigravity session usage, context wheel & quota panel",
+        argumentHint: "[panel]",
+        context: "agent",
+        async onSubmit({ openPanel }) {
+          openPanel("telemetry");
+        },
+      });
+    } catch (err) {
+      console.warn("[antigravity-telemetry] Slash command registration skipped:", err);
+    }
   }
 
   return contributeAntigravityPills(client);

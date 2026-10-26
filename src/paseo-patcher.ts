@@ -124,14 +124,12 @@ export function findPaseoServerInstallations(): string[] {
       }
     }
   } else {
-    // POSIX locations (Linux / macOS)
+    // POSIX locations (Linux / standalone CLI — never inside signed macOS .app bundles)
     const posixLocations = [
       "/usr/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server",
       "/usr/lib/node_modules/@getpaseo/server",
       "/usr/local/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server",
       "/usr/local/lib/node_modules/@getpaseo/server",
-      "/Applications/Paseo.app/Contents/Resources/app.asar.unpacked/node_modules/@getpaseo/server",
-      "/Applications/Paseo.app/Contents/Resources/app/node_modules/@getpaseo/server",
     ];
 
     if (home) {
@@ -209,6 +207,13 @@ export function findPaseoServerInstallations(): string[] {
     const key = process.platform === "win32" ? dir.toLowerCase() : dir;
     if (seen.has(key)) continue;
     seen.add(key);
+    if (
+      process.platform === "darwin" &&
+      dir.includes(".app/Contents/") &&
+      process.env.PASEO_SERVER_PATH !== dir
+    ) {
+      continue;
+    }
     if (fs.existsSync(path.join(dir, "dist")) || fs.existsSync(path.join(dir, "package.json"))) {
       verified.push(dir);
     }

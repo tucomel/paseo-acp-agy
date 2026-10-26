@@ -762,8 +762,8 @@ export class ACPServer extends EventEmitter {
                       toolCall: {
                         toolCallId: toolCall.toolCallId,
                         title: toolCall.title,
-                        kind: "question",
-                        content: [{ type: "text", text: promptText }],
+                        kind: "other",
+                        content: [{ type: "content", content: { type: "text", text: promptText } }],
                         rawInput: toolCall.rawInput,
                       },
                       options,

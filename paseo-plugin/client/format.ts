@@ -41,6 +41,8 @@ export function toneColor(tone: UsageTone, theme: PluginTheme): string {
 export function buildPillLabel(session: SessionTelemetry, quota: QuotaReport): string {
   const parts: string[] = [];
 
+  parts.push(`${Math.round(session.contextPct)}% ctx`);
+
   if (session.totalCostUsd > 0) {
     parts.push(fmtCost(session.totalCostUsd));
   } else if (session.totalTokens > 0) {
@@ -48,8 +50,6 @@ export function buildPillLabel(session: SessionTelemetry, quota: QuotaReport): s
   } else {
     parts.push("$0.00");
   }
-
-  parts.push(`ctx ${Math.round(session.contextPct)}%`);
 
   const primaryFiveHour =
     quota.windows.find((w) => w.id === "session") ?? quota.windows[0] ?? null;

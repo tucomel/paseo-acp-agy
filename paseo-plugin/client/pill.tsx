@@ -5,12 +5,21 @@ import type {
   PluginClientContext,
 } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Text, View } from "react-native";
 import { isAntigravityProvider } from "../shared/telemetry.ts";
 import { useAntigravityTelemetry } from "./data.ts";
 import { TelemetryBody } from "./ui.tsx";
 import { buildPillLabel } from "./ui-helpers.ts";
+
+function sanitizeButtonId(agentId: string): string {
+  const cleaned = agentId
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `agy-telemetry-${cleaned || "agent"}`;
+}
 
 interface PopoverProps {
   theme: PluginTheme;
@@ -62,21 +71,35 @@ export function contributeAntigravityPills(client: PluginClientContext): () => P
 
     function TelemetryPillIcon(props: PluginButtonIconProps) {
       const { data, error } = useAntigravityTelemetry(agentId);
+      const lastLabelRef = useRef<string>("AGY …");
+
       useEffect(() => {
         if (!handle) return;
-        const nextLabel = error
+        const computed = error
           ? "AGY"
           : data
             ? buildPillLabel(data.session, data.quota)
             : "AGY …";
-        handle.update({ label: nextLabel });
+        const nextLabel = computed.trim() || "AGY";
+        if (lastLabelRef.current !== nextLabel) {
+          lastLabelRef.current = nextLabel;
+          handle.update({ label: nextLabel });
+        }
       }, [data, error]);
+
+      const pct = data?.session.contextPct ?? 0;
+      const iconColor =
+        pct >= 90
+          ? "#ef4444"
+          : pct >= 75
+            ? "#f59e0b"
+            : props.color;
 
       return (
         <Icon
           name={data?.session.activeTurn ? "Activity" : "Gauge"}
           size={props.size}
-          color={props.color}
+          color={iconColor}
         />
       );
     }
@@ -123,7 +146,7 @@ export function contributeAntigravityPills(client: PluginClientContext): () => P
     }
 
     handle = client.addComposerPill({
-      id: `agy-telemetry-${agentId}`,
+      id: sanitizeButtonId(agentId),
       workspaceId,
       agentId,
       button: {

@@ -475,6 +475,43 @@ export interface AgentSnapshotInfo {
   } | null;
 }
 
+function estimateConversationContextTokens(conversationId: string | null | undefined, maxTokens: number): number | null {
+  if (!conversationId) return null;
+  const home = os.homedir();
+  const candidates = [
+    process.env.AGY_BRAIN_DIR ? path.join(process.env.AGY_BRAIN_DIR, conversationId) : "",
+    home ? path.join(home, ".gemini", "antigravity-cli", "brain", conversationId) : "",
+    home ? path.join(home, ".antigravity", "brain", conversationId) : "",
+  ].filter(Boolean);
+
+  for (const brainDir of candidates) {
+    const transcriptPath = path.join(brainDir, ".system_generated", "logs", "transcript.jsonl");
+    if (!fs.existsSync(transcriptPath)) continue;
+    try {
+      const content = fs.readFileSync(transcriptPath, "utf-8");
+      const lines = content.split(/\r?\n/).filter(Boolean);
+      let activeChars = 0;
+      for (const line of lines) {
+        try {
+          const step = JSON.parse(line) as Record<string, unknown>;
+          const rawContent = typeof step.content === "string" ? step.content : "";
+          if (step.type === "USER_INPUT" && rawContent.includes("<CONTEXT_SUMMARY>")) {
+            activeChars = 0;
+          }
+          activeChars += rawContent.length;
+          if (typeof step.thinking === "string") activeChars += step.thinking.length;
+          if (Array.isArray(step.tool_calls)) activeChars += JSON.stringify(step.tool_calls).length;
+        } catch {}
+      }
+      if (activeChars <= 0) return null;
+      return Math.min(maxTokens, 4_000 + Math.ceil(activeChars / 4));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export function resolveSessionTelemetry(
   agentId: string,
   snapshot: AgentSnapshotInfo | null | undefined
@@ -496,10 +533,22 @@ export function resolveSessionTelemetry(
         : defaultMax;
     // Prefer live streaming contextWindowUsedTokens from snapshot if higher/fresher mid-turn
     const liveUsed = snapshot?.lastUsage?.contextWindowUsedTokens;
-    const rawUsed =
+    let rawUsed =
       snapshot?.activeTurn && typeof liveUsed === "number" && liveUsed > 0
         ? liveUsed
         : (u.contextWindowUsedTokens ?? liveUsed ?? 0);
+    // Repair legacy pre-v1.3.0 sessions where cumulative inputTokens was clamped to maxTokens
+    if (
+      rawUsed >= maxTokens &&
+      inputTokens > maxTokens &&
+      (!liveUsed || liveUsed >= maxTokens) &&
+      persisted.conversationId
+    ) {
+      const estimated = estimateConversationContextTokens(persisted.conversationId, maxTokens);
+      if (estimated !== null && estimated > 0 && estimated < maxTokens) {
+        rawUsed = estimated;
+      }
+    }
     const usedTokens = Math.min(Math.max(0, rawUsed), maxTokens);
     const totalCostUsd =
       typeof u.totalCostUsd === "number"
@@ -545,9 +594,9 @@ export function resolveSessionTelemetry(
     return {
       agentId,
       sessionId,
-      conversationId: null,
+      conversationId: persisted?.conversationId ?? null,
       model,
-      effort: null,
+      effort: persisted?.effort ?? null,
       activeTurn: Boolean(snapshot.activeTurn),
       inputTokens,
       outputTokens,
@@ -559,6 +608,28 @@ export function resolveSessionTelemetry(
       contextPct: maxTokens > 0 ? Math.min(100, Math.round((usedTokens / maxTokens) * 1000) / 10) : 0,
       updatedAt: snapshot.updatedAt ?? null,
       source: "agent_snapshot",
+    };
+  }
+
+  if (persisted?.conversationId) {
+    const estimated = estimateConversationContextTokens(persisted.conversationId, defaultMax) ?? 0;
+    return {
+      agentId,
+      sessionId,
+      conversationId: persisted.conversationId,
+      model,
+      effort: persisted.effort ?? null,
+      activeTurn: Boolean(snapshot?.activeTurn),
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      totalTokens: 0,
+      totalCostUsd: 0,
+      contextWindowUsedTokens: estimated,
+      contextWindowMaxTokens: defaultMax,
+      contextPct: defaultMax > 0 ? Math.min(100, Math.round((estimated / defaultMax) * 1000) / 10) : 0,
+      updatedAt: persisted.updatedAt ?? snapshot?.updatedAt ?? null,
+      source: "acp_store",
     };
   }
 

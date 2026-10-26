@@ -14,6 +14,7 @@ export interface ReplayItem {
   rawInput?: Record<string, unknown>;
   rawOutput?: string;
   status?: "completed" | "failed";
+  compacted?: boolean;
 }
 
 /**
@@ -109,11 +110,13 @@ export function loadConversationTranscript(conversationId: string): ReplayItem[]
 
       if (stepType === "USER_INPUT") {
         const rawContent = typeof step.content === "string" ? step.content : "";
+        const isCompacted = rawContent.includes("<CONTEXT_SUMMARY>");
         const cleanPrompt = extractCleanUserPrompt(rawContent);
         if (cleanPrompt) {
           replayItems.push({
             type: "user_message",
             text: cleanPrompt,
+            ...(isCompacted ? { compacted: true } : {}),
           });
         }
       } else if (stepType === "PLANNER_RESPONSE") {
@@ -187,6 +190,9 @@ export function estimateReplayContextTokens(items: readonly ReplayItem[]): numbe
   if (!items || items.length === 0) return 0;
   let totalChars = 0;
   for (const item of items) {
+    if (item.compacted) {
+      totalChars = 0;
+    }
     if (item.text) {
       totalChars += item.text.length;
     }

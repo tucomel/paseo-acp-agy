@@ -19,6 +19,7 @@ export interface NormalizedToolResult {
 
 export interface PlanEntry {
   content: string;
+  priority: "high" | "medium" | "low";
   status: "pending" | "in_progress" | "completed";
 }
 
@@ -150,7 +151,7 @@ export function normalizeToolCall(
     return {
       toolCallId,
       title: "❓ Pergunta do Assistente",
-      kind: "question",
+      kind: "other",
       rawInput: normalizedParams,
       questionCard: questionCard || undefined,
     };
@@ -207,8 +208,11 @@ export function normalizeToolResult(
   } else if (name === "read_file" || name === "view_file") {
     if (outputStr.trim()) {
       content.push({
-        type: "text",
-        text: outputStr,
+        type: "content",
+        content: {
+          type: "text",
+          text: outputStr,
+        },
       });
     }
   }
@@ -240,7 +244,7 @@ export function extractPlanEntries(text: string): PlanEntry[] | null {
       } else if (mark === "/" || mark === "-") {
         status = "in_progress";
       }
-      entries.push({ content, status });
+      entries.push({ content, priority: "medium", status });
     }
   }
 

@@ -29,6 +29,22 @@ describe("Tool Formatter & Visual Enhancements", () => {
     expect(res.locations).toEqual([{ path: "/home/ubuntu/projects/app/package.json", line: 10 }]);
     expect(res.rawInput.path).toBe("/home/ubuntu/projects/app/package.json");
     expect(res.rawInput.filePath).toBe("/home/ubuntu/projects/app/package.json");
+
+    const readResult = normalizeToolResult(
+      "read_file",
+      { Path: "/home/ubuntu/projects/app/package.json" },
+      '{\n  "name": "app"\n}'
+    );
+    expect(readResult.status).toBe("completed");
+    expect(readResult.content).toEqual([
+      {
+        type: "content",
+        content: {
+          type: "text",
+          text: '{\n  "name": "app"\n}',
+        },
+      },
+    ]);
   });
 
   it("normalizes edit_file with target, replacement, locations, and diff block", () => {
@@ -101,7 +117,7 @@ describe("Tool Formatter & Visual Enhancements", () => {
       6
     );
 
-    expect(res.kind).toBe("question");
+    expect(res.kind).toBe("other");
     expect(res.title).toBe("❓ Pergunta do Assistente");
     expect(res.questionCard).toBeDefined();
     expect(res.questionCard).toContain("Qual banco de dados deseja configurar?");
@@ -151,10 +167,10 @@ Here is my plan:
     const plan = extractPlanEntries(text);
     expect(plan).toBeDefined();
     expect(plan).toHaveLength(4);
-    expect(plan?.[0]).toEqual({ content: "Analyze codebase structure", status: "completed" });
-    expect(plan?.[1]).toEqual({ content: "Refactor protocol definitions", status: "in_progress" });
-    expect(plan?.[2]).toEqual({ content: "Implement new tool visualizer", status: "pending" });
-    expect(plan?.[3]).toEqual({ content: "Run full test suite", status: "pending" });
+    expect(plan?.[0]).toEqual({ content: "Analyze codebase structure", priority: "medium", status: "completed" });
+    expect(plan?.[1]).toEqual({ content: "Refactor protocol definitions", priority: "medium", status: "in_progress" });
+    expect(plan?.[2]).toEqual({ content: "Implement new tool visualizer", priority: "medium", status: "pending" });
+    expect(plan?.[3]).toEqual({ content: "Run full test suite", priority: "medium", status: "pending" });
   });
 
   it("returns null for text without checklist items", () => {
