@@ -729,10 +729,18 @@ function toneFromUsedPct(usedPct) {
 
 function isStandaloneTelemetryPluginEnabled() {
     try {
-        const paseoHome = process.env.PASEO_HOME || path.join(os.homedir(), ".paseo");
+        let paseoHome = process.env.PASEO_HOME;
+        if (!paseoHome && Array.isArray(process.argv)) {
+            const homeIdx = process.argv.indexOf("--home");
+            if (homeIdx !== -1 && process.argv[homeIdx + 1]) {
+                paseoHome = process.argv[homeIdx + 1];
+            }
+        }
+        paseoHome = paseoHome || path.join(os.homedir(), ".paseo");
         const cfgPath = path.join(paseoHome, "config.json");
         if (!fs.existsSync(cfgPath)) return false;
         const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+        if (cfg && cfg.pluginsEnabled === false) return false;
         const entry = cfg && cfg.plugins && cfg.plugins["antigravity-telemetry"];
         return Boolean(entry && entry.enabled !== false);
     } catch {
@@ -1292,6 +1300,40 @@ ${braceIndent}}`;
           acpCode = nextCode;
           acpModified = true;
         }
+      }
+
+      // Patch handlePromptResponse so response.usage merges defined fields instead of wiping
+      // totalCostUsd / contextWindowMaxTokens / contextWindowUsedTokens from this.currentTurnUsage
+      const promptRespAssignRegex =
+        /([ \t]*)this\.currentTurnUsage\s*=\s*mapACPUsage\(response\.usage\)\s*\?\?\s*this\.currentTurnUsage;/;
+      if (promptRespAssignRegex.test(acpCode) && !acpCode.includes("_mappedRespUsage")) {
+        acpCode = acpCode.replace(
+          promptRespAssignRegex,
+          (_m, ind) =>
+            `${ind}const _mappedRespUsage = mapACPUsage(response.usage);\n` +
+            `${ind}if (_mappedRespUsage) {\n` +
+            `${ind}    this.currentTurnUsage = {\n` +
+            `${ind}        ...this.currentTurnUsage,\n` +
+            `${ind}        ...Object.fromEntries(Object.entries(_mappedRespUsage).filter(([, v]) => v !== undefined)),\n` +
+            `${ind}    };\n` +
+            `${ind}}`
+        );
+        acpModified = true;
+      }
+
+      // Patch subscribe(callback) so any usage_update received during newSession/loadSession
+      // (before subscribers attach, including history resumes) is replayed immediately
+      const subscribeMethodMatch = acpCode.match(/subscribe\s*\([^)]*\)\s*\{[\s\S]*?\n\s*\}/);
+      if (
+        subscribeMethodMatch &&
+        acpCode.includes('type: "thread_started"') &&
+        !subscribeMethodMatch[0].includes("usage_updated")
+      ) {
+        acpCode = acpCode.replace(
+          /(\bcallback\(\{\s*type:\s*"thread_started"[\s\S]*?\}\);\s*\})/,
+          `$1\n        if (this.currentTurnUsage) {\n            callback({\n                type: "usage_updated",\n                provider: this.provider,\n                usage: this.currentTurnUsage,\n            });\n        }`
+        );
+        acpModified = true;
       }
 
       // Patch mapPermissionRequest for native QuestionFormCard support in Paseo UI
@@ -2010,6 +2052,12 @@ export function isPaseoServerPatched(serverDir: string): boolean {
         return false;
       }
       if (pluginDir && (!content.includes("usageSession()") || content.includes("!this.usageProvider"))) {
+        return false;
+      }
+      if (
+        content.includes("mapACPUsage(response.usage) ?? this.currentTurnUsage") &&
+        !content.includes("_mappedRespUsage")
+      ) {
         return false;
       }
     }

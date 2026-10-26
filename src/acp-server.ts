@@ -483,6 +483,7 @@ export class ACPServer extends EventEmitter {
             }
 
             if (!isNotification) {
+              this.publishUsageUpdate(session);
               this.sendSuccess(id, await this.sessionState(session));
               this.publishCommands(session.id);
               this.publishUsageUpdate(session);
@@ -536,6 +537,7 @@ export class ACPServer extends EventEmitter {
             }
 
             if (!isNotification) {
+              this.publishUsageUpdate(session);
               this.sendSuccess(id, await this.sessionState(session));
               this.publishCommands(session.id);
               this.publishUsageUpdate(session);

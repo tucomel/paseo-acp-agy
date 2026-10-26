@@ -631,6 +631,90 @@ class ACPAgentSession {
     expect(isPaseoServerPatched(tempDir)).toBe(true);
   });
 
+  it("preserves contextWindowTokens & totalCostUsd across handlePromptResponse and replays initial usage on subscribe()", () => {
+    const pluginDir = path.join(tempDir, "dist", "server", "builtin-plugins", "antigravity-provider");
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, "index.server.ts"),
+      `export default function contribute(server: any) {\n  return () => {};\n}\n`,
+      "utf-8"
+    );
+
+    const agentDir = path.join(tempDir, "dist", "server", "server", "agent", "providers");
+    fs.mkdirSync(agentDir, { recursive: true });
+    const acpAgentPath = path.join(agentDir, "acp-agent.js");
+    fs.writeFileSync(
+      acpAgentPath,
+      `export function mapACPUsage(usage) {
+    if (!usage) {
+        return undefined;
+    }
+    return {
+        inputTokens: usage.inputTokens ?? undefined,
+        outputTokens: usage.outputTokens ?? undefined,
+        cachedInputTokens: usage.cachedReadTokens ?? undefined,
+    };
+}
+export class ACPAgentSession {
+    constructor() {
+        this.subscribers = new Set();
+        this.sessionId = "sess_1";
+        this.provider = "antigravity";
+        this.usageSessionKey = "key_1";
+    }
+    usageSession() {
+        if (this.closed || !this.usageProvider)
+            return null;
+        return {
+            provider: this.usageProvider,
+            model: this.currentModel ?? undefined,
+            env: {},
+            sessionKey: this.usageSessionKey,
+        };
+    }
+    subscribe(callback) {
+        this.subscribers.add(callback);
+        if (this.sessionId) {
+            callback({
+                type: "thread_started",
+                provider: this.provider,
+                sessionId: this.sessionId,
+            });
+        }
+        return () => {
+            this.subscribers.delete(callback);
+        };
+    }
+    handleUsageUpdate(update) {
+        void update;
+    }
+    handlePromptResponse(response, turnId) {
+        this.currentTurnUsage = mapACPUsage(response.usage) ?? this.currentTurnUsage;
+        this.pushEvent({
+            type: "turn_completed",
+            provider: this.provider,
+            usage: this.currentTurnUsage,
+            turnId,
+        });
+    }
+    pushEvent(event) {
+        for (const sub of this.subscribers) sub(event);
+    }
+}
+`,
+      "utf-8"
+    );
+
+    expect(isPaseoServerPatched(tempDir)).toBe(false);
+    const res = patchPaseoServer(tempDir);
+    expect(res.success).toBe(true);
+    expect(isPaseoServerPatched(tempDir)).toBe(true);
+
+    const updatedAcp = fs.readFileSync(acpAgentPath, "utf-8");
+    expect(updatedAcp).toContain("_mappedRespUsage");
+    expect(updatedAcp).toContain("if (this.currentTurnUsage)");
+  });
+
   it("refuses to downgrade a newer Paseo app.asar from a stale version-mismatched .bak archive", async () => {
     const newSrcDir = path.join(tempDir, "paseo-0.13.0-src");
     fs.mkdirSync(newSrcDir, { recursive: true });
