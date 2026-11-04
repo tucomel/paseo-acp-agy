@@ -27,6 +27,21 @@ export interface PersistedSessionState {
   updatedAt: string;
 }
 
+export function canonicalizeCwd(target: string): string {
+  try {
+    return fs.realpathSync.native(target);
+  } catch {
+    return path.resolve(target);
+  }
+}
+
+export function normalizeCwdForComparison(target: string): string {
+  const canonical = canonicalizeCwd(target);
+  return process.platform === "win32" || process.platform === "darwin"
+    ? canonical.toLowerCase()
+    : canonical;
+}
+
 function getStateRoot(): string {
   if (process.env.AGY_ACP_STATE_DIR) {
     return process.env.AGY_ACP_STATE_DIR;
@@ -131,7 +146,7 @@ export class SessionStore {
   list(cwd?: string): PersistedSessionState[] {
     if (!fs.existsSync(this.dir)) return [];
     const results: PersistedSessionState[] = [];
-    const normalizedTargetCwd = cwd ? path.resolve(cwd).toLowerCase() : undefined;
+    const normalizedTargetCwd = cwd ? normalizeCwdForComparison(cwd) : undefined;
 
     try {
       const files = fs.readdirSync(this.dir);
@@ -154,7 +169,7 @@ export class SessionStore {
           }
 
           if (normalizedTargetCwd && parsed.cwd) {
-            const sessionCwd = path.resolve(parsed.cwd).toLowerCase();
+            const sessionCwd = normalizeCwdForComparison(parsed.cwd);
             if (sessionCwd !== normalizedTargetCwd) continue;
           }
           results.push(parsed);

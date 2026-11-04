@@ -6,6 +6,7 @@ import { logger } from "./logger.js";
 import { resolvePermissionSettings } from "./permissions.js";
 import { calculateUsageCostUsd, getModelContextWindow, SessionInfo } from "./protocol.js";
 import {
+  normalizeCwdForComparison,
   PersistedSessionState,
   SessionStore,
   SessionUsageState,
@@ -148,14 +149,24 @@ export class Session {
 
   endPromptOperation(): void {
     this.promptOperationActive = false;
+    const maxTokens = getModelContextWindow(this.model);
+    if (this.usage.contextWindowMaxTokens !== maxTokens) {
+      this.usage.contextWindowMaxTokens = maxTokens;
+      if (this.usage.contextWindowUsedTokens > maxTokens) {
+        this.usage.contextWindowUsedTokens = Math.min(this.usage.contextWindowUsedTokens, maxTokens);
+      }
+      this.persist();
+    }
   }
 
   setModel(model: string) {
     this.model = model;
-    const maxTokens = getModelContextWindow(model);
-    this.usage.contextWindowMaxTokens = maxTokens;
-    if (this.usage.contextWindowUsedTokens > maxTokens) {
-      this.usage.contextWindowUsedTokens = Math.min(this.usage.contextWindowUsedTokens, maxTokens);
+    if (!this.promptOperationActive) {
+      const maxTokens = getModelContextWindow(model);
+      this.usage.contextWindowMaxTokens = maxTokens;
+      if (this.usage.contextWindowUsedTokens > maxTokens) {
+        this.usage.contextWindowUsedTokens = Math.min(this.usage.contextWindowUsedTokens, maxTokens);
+      }
     }
     this.process.setModel(model);
     this.persist();
@@ -412,11 +423,11 @@ export class SessionManager {
     }
 
     // 3. Active in-memory sessions
+    const normalizedTargetCwd = cwd ? normalizeCwdForComparison(cwd) : undefined;
     for (const active of this.sessions.values()) {
-      if (cwd) {
-        const targetCwd = path.resolve(cwd).toLowerCase();
-        const activeCwd = path.resolve(active.cwd).toLowerCase();
-        if (targetCwd !== activeCwd) continue;
+      if (normalizedTargetCwd) {
+        const activeCwd = normalizeCwdForComparison(active.cwd);
+        if (normalizedTargetCwd !== activeCwd) continue;
       }
       const hasTitle = Boolean(active.title && active.title.trim());
       const hasConv = Boolean(active.process.currentConversationId);

@@ -455,6 +455,33 @@ export class AntigravityProcess extends EventEmitter {
       throw new Error("Failed to create stdio pipes for agy process");
     }
 
+    const handleStdinError = (err: NodeJS.ErrnoException) => {
+      if (this.isClosed) return;
+      logger.warn("agy child stdin emitted error", {
+        pid: child.pid,
+        code: err.code,
+        error: err.message,
+      });
+      if (this.currentTurnPromise?.child === child) {
+        const turn = this.currentTurnPromise;
+        this.currentTurnPromise = null;
+        turn.reject(
+          turn.cancelled
+            ? new Error("Turn was cancelled")
+            : new Error(`agy process stdin failed (${err.code || "ERR"}): ${err.message}`)
+        );
+      }
+      if (this.child === child) {
+        this.child = null;
+        this.initialInfo = null;
+      }
+      void this.terminateChild(child).catch(() => {});
+    };
+
+    if (typeof child.stdin.on === "function") {
+      child.stdin.on("error", handleStdinError);
+    }
+
     child.stdout.setEncoding("utf-8");
     child.stderr.setEncoding("utf-8");
     let stdoutBuffer = "";
@@ -850,7 +877,20 @@ export class AntigravityProcess extends EventEmitter {
         message: { content: text },
       };
       logger.debug("Writing prompt to agy stdin", { promptPreview: text.slice(0, 100) });
-      child.stdin.write(JSON.stringify(payload) + "\n");
+      child.stdin.write(JSON.stringify(payload) + "\n", (writeErr) => {
+        if (writeErr && this.currentTurnPromise === active) {
+          if (this.child === child) {
+            this.child = null;
+            this.initialInfo = null;
+          }
+          void this.terminateChild(child).catch(() => {});
+          active.reject(
+            active.cancelled
+              ? new Error("Turn was cancelled")
+              : new Error(`Failed to write prompt to agy stdin: ${writeErr.message}`)
+          );
+        }
+      });
     } catch (err) {
       cleanupAndSettle(() => active.reject(err as Error));
     }

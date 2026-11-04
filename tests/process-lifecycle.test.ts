@@ -167,4 +167,47 @@ describe("Antigravity subprocess lifecycle", () => {
     expect(prompt2.result?.status).toBe("SUCCESS");
     await adapter.close();
   });
+
+  // Closing fd 0 does not sever the inherited pipe on Windows, so gate this POSIX pipe-break fixture.
+  it.skipIf(process.platform === "win32")(
+    "rejects the active turn and retires a broken process when child closes stdin while staying alive",
+    async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-epipe-test-"));
+    tempDirs.push(dir);
+    const markerFile = path.join(dir, "broken-once");
+    const fakeAgy = path.join(dir, "fake-epipe.mjs");
+    fs.writeFileSync(
+      fakeAgy,
+      `#!/usr/bin/env node\n` +
+        `import fs from "node:fs";\n` +
+        `import net from "node:net";\n` +
+        `const brokenOnce = !fs.existsSync(${JSON.stringify(markerFile)});\n` +
+        `if (brokenOnce) fs.writeFileSync(${JSON.stringify(markerFile)}, "1");\n` +
+        `process.stdout.write(JSON.stringify({event:"init",conversation_id:"c-epipe",init:{model:"fake"}}) + "\\n");\n` +
+        `if (brokenOnce) {\n` +
+        `  try { fs.closeSync(0); } catch {}\n` +
+        `  const timer = setInterval(() => {}, 1000);\n` +
+        `  process.on("SIGTERM", () => { clearInterval(timer); process.exit(0); });\n` +
+        `} else {\n` +
+        `  process.stdin.setEncoding("utf8");\n` +
+        `  process.stdin.on("data", () => {\n` +
+        `    process.stdout.write(JSON.stringify({event:"result",result:{conversation_id:"c-epipe",status:"SUCCESS",response:"recovered"}}) + "\\n");\n` +
+        `  });\n` +
+        `}\n`,
+      { mode: 0o700 }
+    );
+
+    const adapter = new AntigravityProcess({ binaryPath: fakeAgy, cwd: dir });
+    await adapter.ensureReady();
+    // Allow OS pipe closure to propagate
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    await expect(adapter.sendPrompt("should fail fast on broken stdin")).rejects.toThrow(
+      /stdin|EPIPE|closed|exited/i
+    );
+
+    const recovered = await adapter.sendPrompt("should spawn healthy process");
+    expect(recovered.result?.response).toBe("recovered");
+    await adapter.close();
+  });
 });

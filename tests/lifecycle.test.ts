@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import { ACPServer } from "../src/acp-server.js";
 import { SessionManager } from "../src/session.js";
+import { SessionStore } from "../src/session-store.js";
 
 describe("ACP Session Lifecycle & Isolation", () => {
   let server: ACPServer;
@@ -150,5 +154,77 @@ describe("ACP Session Lifecycle & Isolation", () => {
 
     expect(closeSpy).toHaveBeenCalled();
     expect(sessionManager.getSession(session.id)).toBeUndefined();
+  });
+
+  it("preserves active turn contextWindowMaxTokens during mid-turn setModel until turn finishes", async () => {
+    const session = sessionManager.createSession({
+      cwd: "/tmp",
+      model: "gemini-3.1-pro",
+    });
+    session.usage.contextWindowUsedTokens = 500_000;
+    expect(session.usage.contextWindowMaxTokens).toBe(2_097_152);
+    expect(session.tryBeginPromptOperation()).toBe(true);
+
+    responses.length = 0;
+    sendRpc({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "session/set_model",
+      params: { sessionId: session.id, modelId: "claude-sonnet-4-6" },
+    });
+
+    const res7 = await waitForResponse(7);
+    expect(res7.result.configOptions).toBeDefined();
+    expect(session.model).toBe("claude-sonnet-4-6");
+    // While turn is active, contextWindowMaxTokens stays on executing model (2M) and no usage_update clobbers it
+    expect(session.usage.contextWindowMaxTokens).toBe(2_097_152);
+    expect(session.usage.contextWindowUsedTokens).toBe(500_000);
+    expect(
+      responses.some(
+        (msg) => msg.method === "session/update" && msg.params?.update?.sessionUpdate === "usage_update"
+      )
+    ).toBe(false);
+
+    session.endPromptOperation();
+    expect(session.usage.contextWindowMaxTokens).toBe(200_000);
+    expect(session.usage.contextWindowUsedTokens).toBe(200_000);
+  });
+
+  it("drains in-flight session/new and rejects pending client requests on stop()", async () => {
+    const pendingClientReq = server.sendRequest("session/request_permission", { test: true });
+    const rejection = expect(pendingClientReq).rejects.toThrow(/ACP server stopped/);
+
+    sendRpc({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "session/new",
+      params: { cwd: "/tmp/stop-race" },
+    });
+    await server.stop();
+
+    await rejection;
+    expect(sessionManager.listActiveSessions()).toHaveLength(0);
+  });
+
+  it("matches symlinked workspace paths in SessionManager.listSessions", () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agy-symlink-cwd-"));
+    try {
+      const realWorkspace = path.join(tmpRoot, "real-workspace");
+      const symlinkWorkspace = path.join(tmpRoot, "symlink-workspace");
+      fs.mkdirSync(realWorkspace, { recursive: true });
+      fs.symlinkSync(realWorkspace, symlinkWorkspace, "dir");
+
+      const store = new SessionStore(path.join(tmpRoot, "sessions"));
+      const manager = new SessionManager({ store });
+      const created = manager.createSession({
+        cwd: realWorkspace,
+        title: "Symlink Test Session",
+      });
+
+      const listedViaSymlink = manager.listSessions(symlinkWorkspace);
+      expect(listedViaSymlink.some((s) => s.sessionId === created.id)).toBe(true);
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 });

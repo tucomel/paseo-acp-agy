@@ -56,6 +56,7 @@ export class ACPServer extends EventEmitter {
     resolve: (value: any) => void;
     reject: (reason?: any) => void;
   }>();
+  private inFlight = new Set<Promise<void>>();
   private usagePublishTimers = new Map<string, Set<NodeJS.Timeout>>();
   private nextRequestId = 1;
 
@@ -95,9 +96,14 @@ export class ACPServer extends EventEmitter {
       terminal: false,
     });
     this.rl.on("line", (line: string) => {
-      this.handleLine(line).catch((err) => {
-        logger.error("Error processing line in ACP server", { error: (err as Error).message });
-      });
+      const task = this.handleLine(line)
+        .catch((err) => {
+          logger.error("Error processing line in ACP server", { error: (err as Error).message });
+        })
+        .finally(() => {
+          this.inFlight.delete(task);
+        });
+      this.inFlight.add(task);
     });
     this.rl.on("close", () => {
       logger.info("ACP input stream closed, shutting down server");
@@ -372,12 +378,19 @@ export class ACPServer extends EventEmitter {
           });
 
           if (!isNotification) {
-            this.sendSuccess(id, await this.sessionState(session, true));
+            const state = await this.sessionState(session, true);
+            if (!this.isRunning) {
+              await this.sessionManager.closeSession(session.id).catch(() => false);
+              break;
+            }
+            this.sendSuccess(id, state);
             this.publishCommands(session.id);
             this.publishUsageUpdate(session);
             // Re-publish usage across startup window so ACPAgent receives it after
             // awaiting newSession + applyConfiguredOverrides() + session.subscribe()
             this.scheduleUsagePublishBurst(session.id, [120, 450, 1200, 2800]);
+          } else if (!this.isRunning) {
+            await this.sessionManager.closeSession(session.id).catch(() => false);
           }
           break;
         }
@@ -397,6 +410,7 @@ export class ACPServer extends EventEmitter {
           }
 
           let session = this.sessionManager.getSession(sessionId);
+          let created = false;
           try {
             if (!session) {
               session = this.sessionManager.createSession({
@@ -404,12 +418,17 @@ export class ACPServer extends EventEmitter {
                 cwd,
                 binaryPath: this.binaryPath,
               });
+              created = true;
             }
 
             const conversationId = session.process.currentConversationId;
             if (conversationId) {
               try {
                 const replayItems = await loadConversationTranscript(conversationId);
+                if (!this.isRunning) {
+                  if (created) await this.sessionManager.closeSession(session.id).catch(() => false);
+                  break;
+                }
                 if (!session.title && replayItems.length > 0) {
                   const firstUser = replayItems.find((item) => item.type === "user_message");
                   if (firstUser && firstUser.text) {
@@ -483,13 +502,23 @@ export class ACPServer extends EventEmitter {
             }
 
             if (!isNotification) {
+              const state = await this.sessionState(session);
+              if (!this.isRunning) {
+                if (created) await this.sessionManager.closeSession(session.id).catch(() => false);
+                break;
+              }
               this.publishUsageUpdate(session);
-              this.sendSuccess(id, await this.sessionState(session));
+              this.sendSuccess(id, state);
               this.publishCommands(session.id);
               this.publishUsageUpdate(session);
               this.scheduleUsagePublishBurst(session.id, [120, 450, 1200, 2800]);
+            } else if (!this.isRunning && created) {
+              await this.sessionManager.closeSession(session.id).catch(() => false);
             }
           } catch (err) {
+            if (created) {
+              await this.sessionManager.closeSession(sessionId).catch(() => false);
+            }
             if (!isNotification) {
               this.sendError(
                 id,
@@ -522,6 +551,10 @@ export class ACPServer extends EventEmitter {
               created = true;
             }
             await session.ensureReadyForResume();
+            if (!this.isRunning) {
+              if (created) await this.sessionManager.closeSession(sessionId).catch(() => false);
+              break;
+            }
             const resumeConversationId = session.process.currentConversationId;
             if (
               resumeConversationId &&
@@ -537,11 +570,18 @@ export class ACPServer extends EventEmitter {
             }
 
             if (!isNotification) {
+              const state = await this.sessionState(session);
+              if (!this.isRunning) {
+                if (created) await this.sessionManager.closeSession(sessionId).catch(() => false);
+                break;
+              }
               this.publishUsageUpdate(session);
-              this.sendSuccess(id, await this.sessionState(session));
+              this.sendSuccess(id, state);
               this.publishCommands(session.id);
               this.publishUsageUpdate(session);
               this.scheduleUsagePublishBurst(session.id, [120, 450, 1200, 2800]);
+            } else if (!this.isRunning && created) {
+              await this.sessionManager.closeSession(sessionId).catch(() => false);
             }
           } catch (err) {
             if (created || session) {
@@ -600,10 +640,17 @@ export class ACPServer extends EventEmitter {
             newSession.setTitle(`${sourceSession.title} (fork)`);
           }
           if (!isNotification) {
-            this.sendSuccess(id, await this.sessionState(newSession));
+            const state = await this.sessionState(newSession);
+            if (!this.isRunning) {
+              await this.sessionManager.closeSession(newSession.id).catch(() => false);
+              break;
+            }
+            this.sendSuccess(id, state);
             this.publishCommands(newSession.id);
             this.publishUsageUpdate(newSession);
             this.scheduleUsagePublishBurst(newSession.id, [120, 450, 1200]);
+          } else if (!this.isRunning) {
+            await this.sessionManager.closeSession(newSession.id).catch(() => false);
           }
           break;
         }
@@ -1028,8 +1075,10 @@ export class ACPServer extends EventEmitter {
           session.setMode(modeId);
           if (!isNotification) {
             this.sendSuccess(id, {});
-            this.publishUsageUpdate(session);
-            this.scheduleUsagePublishBurst(session.id, [80, 350, 1000]);
+            if (!session.isPromptOperationActive) {
+              this.publishUsageUpdate(session);
+              this.scheduleUsagePublishBurst(session.id, [80, 350, 1000]);
+            }
           }
           break;
         }
@@ -1078,8 +1127,10 @@ export class ACPServer extends EventEmitter {
           });
           if (!isNotification) {
             this.sendSuccess(id, { configOptions });
-            this.publishUsageUpdate(session);
-            this.scheduleUsagePublishBurst(session.id, [80, 350, 1000]);
+            if (!session.isPromptOperationActive) {
+              this.publishUsageUpdate(session);
+              this.scheduleUsagePublishBurst(session.id, [80, 350, 1000]);
+            }
           }
           break;
         }
@@ -1147,8 +1198,10 @@ export class ACPServer extends EventEmitter {
           });
           if (!isNotification) {
             this.sendSuccess(id, { configOptions });
-            this.publishUsageUpdate(session);
-            this.scheduleUsagePublishBurst(session.id, [80, 350, 1000]);
+            if (!session.isPromptOperationActive) {
+              this.publishUsageUpdate(session);
+              this.scheduleUsagePublishBurst(session.id, [80, 350, 1000]);
+            }
           }
           break;
         }
@@ -1176,10 +1229,16 @@ export class ACPServer extends EventEmitter {
     if (!this.isRunning) return;
     this.isRunning = false;
     this.clearUsagePublishTimers();
+    for (const pending of this.pendingRequests.values()) {
+      pending.reject(new Error("ACP server stopped"));
+    }
+    this.pendingRequests.clear();
     if (this.rl) {
       this.rl.close();
       this.rl = null;
     }
+    await Promise.all([this.sessionManager.closeAll(), Promise.allSettled(this.inFlight)]);
+    this.clearUsagePublishTimers();
     await this.sessionManager.closeAll();
     logger.info("ACP Server stopped");
   }

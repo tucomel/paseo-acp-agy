@@ -4,6 +4,7 @@ import os from "node:os";
 import { createRequire } from "node:module";
 import { logger } from "./logger.js";
 import { SessionInfo } from "./protocol.js";
+import { normalizeCwdForComparison } from "./session-store.js";
 
 const require = createRequire(import.meta.url);
 
@@ -64,7 +65,7 @@ export function loadNativeAntigravitySessions(cwd?: string): SessionInfo[] {
   const appDataDir = getAgyAppDataDir();
   const dbPath = path.join(appDataDir, "conversation_summaries.db");
 
-  const normalizedTargetCwd = cwd ? path.resolve(cwd).toLowerCase() : undefined;
+  const normalizedTargetCwd = cwd ? normalizeCwdForComparison(cwd) : undefined;
 
   if (fs.existsSync(dbPath)) {
     try {
@@ -101,7 +102,7 @@ export function loadNativeAntigravitySessions(cwd?: string): SessionInfo[] {
               }
               if (normalizedTargetCwd) {
                 matchesCwd = filePaths.some(
-                  (p) => p.toLowerCase() === normalizedTargetCwd
+                  (p) => normalizeCwdForComparison(p) === normalizedTargetCwd
                 );
               }
             }
