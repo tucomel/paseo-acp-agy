@@ -13,6 +13,7 @@ import {
   getEffectiveEffortForModel,
 } from "./protocol.js";
 import { buildAgyArgs, PermissionSettings, resolvePermissionSettings } from "./permissions.js";
+import { clearConversationQuotaErrors } from "./native-sessions.js";
 
 let cachedBinaryPath: string | null = null;
 let lastBinaryResolveTime = 0;
@@ -251,6 +252,9 @@ export class AntigravityProcess extends EventEmitter {
   setModel(model: string) {
     if (this.model !== model) {
       this.model = model;
+      if (this.conversationId) {
+        clearConversationQuotaErrors(this.conversationId);
+      }
       this.scheduleRestart();
     }
   }
@@ -281,6 +285,9 @@ export class AntigravityProcess extends EventEmitter {
   setConversationId(conversationId?: string) {
     if (this.conversationId !== conversationId) {
       this.conversationId = conversationId;
+      if (conversationId) {
+        clearConversationQuotaErrors(conversationId);
+      }
       this.scheduleRestart();
     }
   }
@@ -412,7 +419,10 @@ export class AntigravityProcess extends EventEmitter {
     if (this.model) extraArgs.push("--model", this.model);
     const effectiveEffort = getEffectiveEffortForModel(this.model, this.effort);
     if (effectiveEffort) extraArgs.push("--effort", effectiveEffort);
-    if (this.conversationId) extraArgs.push("--conversation", this.conversationId);
+    if (this.conversationId) {
+      clearConversationQuotaErrors(this.conversationId);
+      extraArgs.push("--conversation", this.conversationId);
+    }
 
     const addDirs = [...(this.permissions.addDirs || [])];
     if (this.cwd && !addDirs.includes(this.cwd)) {

@@ -150,4 +150,105 @@ describe("ACP Prompt Streaming & Tool Call Translation", () => {
     expect(promptResponse).toBeDefined();
     expect(promptResponse.result.stopReason).toBe("end_turn");
   });
+
+  it("should ignore stale quota error when prompt turn completed with agent response chunks", async () => {
+    const session = sessionManager.createSession({ cwd: "/tmp" });
+
+    vi.spyOn(session.process, "sendPrompt").mockImplementation(
+      async (text: string, onStepUpdate?: (event: AgyStepUpdateEvent) => void): Promise<AgyResultEvent> => {
+        if (onStepUpdate) {
+          onStepUpdate({
+            event: "step_update",
+            step_update: {
+              conversation_id: "test-conv",
+              step_index: 1,
+              state: "ACTIVE",
+              step_type: "agent_response",
+              text_delta: "Tudo resolvido com sucesso!",
+            },
+          });
+        }
+
+        return {
+          event: "result",
+          result: {
+            conversation_id: "test-conv",
+            status: "ERROR",
+            error: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 162h.",
+            response: "Tudo resolvido com sucesso!",
+            duration_seconds: 1.0,
+            num_turns: 1,
+          },
+        };
+      }
+    );
+
+    sendRpc({
+      jsonrpc: "2.0",
+      id: 20,
+      method: "session/prompt",
+      params: {
+        sessionId: session.id,
+        prompt: [{ type: "text", text: "pode resolver tudo chat" }],
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const promptResponse = responses.find((r) => r.id === 20);
+    expect(promptResponse).toBeDefined();
+    // Should be end_turn because the model completed its response, ignoring stale quota error
+    expect(promptResponse.result.stopReason).toBe("end_turn");
+
+    const notifications = responses.filter((r) => r.method === "session/update");
+    const errorChunks = notifications.filter(
+      (n) =>
+        n.params.update.sessionUpdate === "agent_message_chunk" &&
+        n.params.update.content?.text?.includes("**Error:**")
+    );
+    expect(errorChunks.length).toBe(0);
+  });
+
+  it("should report genuine quota error when no agent response was produced", async () => {
+    const session = sessionManager.createSession({ cwd: "/tmp" });
+
+    vi.spyOn(session.process, "sendPrompt").mockImplementation(
+      async (): Promise<AgyResultEvent> => {
+        return {
+          event: "result",
+          result: {
+            conversation_id: "test-conv",
+            status: "ERROR",
+            error: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 162h.",
+            duration_seconds: 0.1,
+            num_turns: 0,
+          },
+        };
+      }
+    );
+
+    sendRpc({
+      jsonrpc: "2.0",
+      id: 30,
+      method: "session/prompt",
+      params: {
+        sessionId: session.id,
+        prompt: [{ type: "text", text: "run heavy task" }],
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const promptResponse = responses.find((r) => r.id === 30);
+    expect(promptResponse).toBeDefined();
+    expect(promptResponse.result.stopReason).toBe("refusal");
+
+    const notifications = responses.filter((r) => r.method === "session/update");
+    const errorChunk = notifications.find(
+      (n) =>
+        n.params.update.sessionUpdate === "agent_message_chunk" &&
+        n.params.update.content?.text?.includes("**Error:** Individual quota reached")
+    );
+    expect(errorChunk).toBeDefined();
+  });
 });

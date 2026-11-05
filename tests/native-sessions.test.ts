@@ -3,7 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { loadNativeAntigravitySessions, getNativeAntigravitySession } from "../src/native-sessions.js";
+import {
+  loadNativeAntigravitySessions,
+  getNativeAntigravitySession,
+  clearConversationQuotaErrors,
+} from "../src/native-sessions.js";
 
 describe("Native Antigravity Sessions Discovery", () => {
   let tempDir: string;
@@ -102,5 +106,72 @@ describe("Native Antigravity Sessions Discovery", () => {
     expect(single).toBeDefined();
     expect(single?.title).toBe("Optimize Search Algorithm");
     expect(single?.sessionId).toBe("conv-1111-2222");
+  });
+
+  it("clears conversation quota error steps from conversation SQLite database", () => {
+    const convId = "4abcfa99-8b28-44a5-8cc4-63fb9fa1a7a3";
+    const convsDir = path.join(tempDir, "conversations");
+    fs.mkdirSync(convsDir, { recursive: true });
+    const dbPath = path.join(convsDir, `${convId}.db`);
+
+    const initSql = `
+      CREATE TABLE steps (
+        idx integer PRIMARY KEY,
+        step_type integer NOT NULL DEFAULT 0,
+        status integer NOT NULL DEFAULT 0,
+        error_details blob,
+        step_payload blob,
+        render_info blob
+      );
+      INSERT INTO steps (idx, step_type, status, error_details) VALUES (
+        1,
+        17,
+        3,
+        'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription.'
+      );
+      INSERT INTO steps (idx, step_type, status, error_details) VALUES (
+        2,
+        17,
+        3,
+        'TypeError: Cannot read properties of undefined'
+      );
+    `;
+
+    try {
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(dbPath);
+      db.exec(initSql);
+      db.close();
+    } catch {
+      execFileSync("sqlite3", [dbPath, initSql], { stdio: "ignore" });
+    }
+
+    // Invalid UUID is rejected
+    expect(clearConversationQuotaErrors("invalid-id")).toBe(false);
+
+    // Valid conversation clears quota error step
+    const result = clearConversationQuotaErrors(convId);
+    expect(result).toBe(true);
+
+    // Verify step 1 was updated to step_type 15 and step 2 remains 17
+    let rows: any[] = [];
+    try {
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(dbPath, { readOnly: true });
+      rows = db.prepare("SELECT idx, step_type FROM steps ORDER BY idx ASC").all();
+      db.close();
+    } catch {
+      const out = execFileSync(
+        "sqlite3",
+        ["-json", dbPath, "SELECT idx, step_type FROM steps ORDER BY idx ASC"],
+        { encoding: "utf-8" }
+      );
+      rows = JSON.parse(out);
+    }
+
+    expect(rows).toEqual([
+      { idx: 1, step_type: 15 },
+      { idx: 2, step_type: 17 },
+    ]);
   });
 });

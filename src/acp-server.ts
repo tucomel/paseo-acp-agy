@@ -31,6 +31,7 @@ import { resolveDefaultAgyBinary } from "./antigravity-process.js";
 import { loadConversationTranscript, estimateReplayContextTokens } from "./transcript.js";
 import { normalizeToolCall, normalizeToolResult, extractPlanEntries } from "./tool-formatter.js";
 import { McpBridge, McpServerConfig } from "./mcp-bridge.js";
+import { clearConversationQuotaErrors } from "./native-sessions.js";
 
 function splitModelAndEffort(modelInput?: string): { model?: string; effort?: string } {
   if (!modelInput) return {};
@@ -713,6 +714,7 @@ export class ACPServer extends EventEmitter {
             }
 
             let hasSentNonNarration = false;
+            let hasSentAgentMessage = false;
             let latestStepContextTokens: number | undefined;
             let stepCount = 0;
             const onStepUpdate = (event: AgyStepUpdateEvent) => {
@@ -728,6 +730,7 @@ export class ACPServer extends EventEmitter {
                   }
                   hasSentNonNarration = true;
                 }
+                hasSentAgentMessage = true;
                 this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
                   sessionId: session.id,
                   update: {
@@ -989,17 +992,42 @@ export class ACPServer extends EventEmitter {
                 }
               } else if (resultEvent.result?.status === "ERROR") {
                 const errorMessage = resultEvent.result.error || "Turn failed with an error";
-                logger.error("Turn result reported error", { error: errorMessage, sessionId });
-                this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
-                  sessionId: session.id,
-                  update: {
-                    sessionUpdate: "agent_message_chunk",
-                    content: { type: "text", text: `\n\n**Error:** ${errorMessage}\n` },
-                  },
-                });
-                if (!isNotification) {
-                  this.sendSuccess(id, { stopReason: "refusal", usage: usagePayload });
-                  this.scheduleUsagePublishBurst(session.id, [25, 150]);
+                const isQuotaError =
+                  /quota reached|resource_exhausted|rate limit|upgrade your subscription/i.test(
+                    errorMessage
+                  );
+                const hasProducedOutput =
+                  hasSentAgentMessage ||
+                  (hasSentNonNarration && stepCount > 0) ||
+                  Boolean(resultEvent.result?.response && resultEvent.result.response.trim().length > 0);
+
+                if (isQuotaError && hasProducedOutput) {
+                  logger.warn(
+                    "Ignoring stale quota error on completed turn and clearing db error steps",
+                    {
+                      error: errorMessage,
+                      sessionId,
+                      conversationId: session.process.currentConversationId,
+                    }
+                  );
+                  clearConversationQuotaErrors(session.process.currentConversationId);
+                  if (!isNotification) {
+                    this.sendSuccess(id, { stopReason: "end_turn", usage: usagePayload });
+                    this.scheduleUsagePublishBurst(session.id, [25, 150]);
+                  }
+                } else {
+                  logger.error("Turn result reported error", { error: errorMessage, sessionId });
+                  this.sendNotification(ACP_METHODS.SESSION_UPDATE, {
+                    sessionId: session.id,
+                    update: {
+                      sessionUpdate: "agent_message_chunk",
+                      content: { type: "text", text: `\n\n**Error:** ${errorMessage}\n` },
+                    },
+                  });
+                  if (!isNotification) {
+                    this.sendSuccess(id, { stopReason: "refusal", usage: usagePayload });
+                    this.scheduleUsagePublishBurst(session.id, [25, 150]);
+                  }
                 }
               } else if (!isNotification) {
                 this.sendSuccess(id, { stopReason: "end_turn", usage: usagePayload });

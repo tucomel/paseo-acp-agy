@@ -16,6 +16,7 @@ import { resolveConversationBrainDir } from "./transcript.js";
 import {
   loadNativeAntigravitySessions,
   getNativeAntigravitySession,
+  clearConversationQuotaErrors,
 } from "./native-sessions.js";
 
 export interface SessionOptions {
@@ -160,6 +161,7 @@ export class Session {
   }
 
   setModel(model: string) {
+    const modelChanged = this.model !== model;
     this.model = model;
     if (!this.promptOperationActive) {
       const maxTokens = getModelContextWindow(model);
@@ -169,6 +171,12 @@ export class Session {
       }
     }
     this.process.setModel(model);
+    if (modelChanged) {
+      const convId = this.process.currentConversationId;
+      if (convId) {
+        clearConversationQuotaErrors(convId);
+      }
+    }
     this.persist();
   }
 

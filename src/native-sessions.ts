@@ -229,3 +229,55 @@ export function getNativeAntigravitySession(conversationId: string): SessionInfo
 
   return null;
 }
+
+export function clearConversationQuotaErrors(conversationId?: string): boolean {
+  if (!conversationId) return false;
+  // Ensure valid UUID format to avoid unexpected paths or SQL injection
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conversationId)) {
+    return false;
+  }
+
+  const appDataDir = getAgyAppDataDir();
+  const dbPath = path.join(appDataDir, "conversations", `${conversationId}.db`);
+  if (!fs.existsSync(dbPath)) {
+    return false;
+  }
+
+  const sql = `PRAGMA busy_timeout = 3000; UPDATE steps SET step_type = 15 WHERE step_type = 17 AND (CAST(error_details AS TEXT) LIKE '%quota%' OR CAST(error_details AS TEXT) LIKE '%resource_exhausted%' OR CAST(step_payload AS TEXT) LIKE '%quota%' OR CAST(step_payload AS TEXT) LIKE '%resource_exhausted%' OR CAST(render_info AS TEXT) LIKE '%quota%' OR CAST(render_info AS TEXT) LIKE '%resource_exhausted%'); PRAGMA wal_checkpoint(FULL);`;
+
+  // 1. Try node:sqlite DatabaseSync (Node 22+)
+  try {
+    const DatabaseSync = require("node:sqlite")?.DatabaseSync;
+    if (DatabaseSync) {
+      const db = new DatabaseSync(dbPath);
+      db.exec(sql);
+      db.close();
+      logger.info("Cleared conversation quota error steps via DatabaseSync", { conversationId });
+      return true;
+    }
+  } catch (err) {
+    logger.debug("DatabaseSync clearConversationQuotaErrors error, falling back to sqlite3 CLI", {
+      error: (err as Error).message,
+    });
+  }
+
+  // 2. Try sqlite3 CLI fallback (macOS, Linux)
+  try {
+    const { execFileSync } = require("node:child_process");
+    execFileSync("sqlite3", [dbPath, sql], {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    logger.info("Cleared conversation quota error steps via sqlite3 CLI", { conversationId });
+    return true;
+  } catch (err) {
+    logger.debug("Failed to clear conversation quota error steps via sqlite3 CLI", {
+      conversationId,
+      error: (err as Error).message,
+    });
+  }
+
+  return false;
+}
+
