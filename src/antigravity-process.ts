@@ -793,7 +793,16 @@ export class AntigravityProcess extends EventEmitter {
         : 0; // Default to 0 (disabled). Do NOT kill long-running agent tasks arbitrarily.
 
     const resetInactivityTimer = () => {
-      if (turnTimeoutMs <= 0) return;
+      if (turnTimeoutMs <= 0) {
+        logger.debug("Turn inactivity timeout is disabled", {
+          conversationId: this.conversationId,
+        });
+        return;
+      }
+      logger.info("Turn inactivity timer armed", {
+        timeoutMs: turnTimeoutMs,
+        conversationId: this.conversationId,
+      });
       if (inactivityTimer) clearTimeout(inactivityTimer);
       inactivityTimer = setTimeout(() => {
         logger.error("Turn timed out due to lack of activity from agy", {

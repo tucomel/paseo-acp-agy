@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-function getPackageVersion(): string {
+export function getDiskPackageVersion(): string {
   try {
     const pkgPath = path.resolve(__dirname, "..", "package.json");
     if (fs.existsSync(pkgPath)) {
@@ -19,7 +19,16 @@ function getPackageVersion(): string {
   return "1.2.2";
 }
 
-export const SEMVER_VERSION = getPackageVersion();
+export const SEMVER_VERSION = getDiskPackageVersion();
+
+export function checkDiskVersionMismatch(): { outdated: boolean; diskVersion: string; inMemoryVersion: string } {
+  const diskVersion = getDiskPackageVersion();
+  return {
+    outdated: diskVersion !== SEMVER_VERSION,
+    diskVersion,
+    inMemoryVersion: SEMVER_VERSION,
+  };
+}
 
 export interface BuildMetadata {
   version: string;

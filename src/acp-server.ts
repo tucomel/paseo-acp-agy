@@ -26,7 +26,7 @@ import {
 } from "./protocol.js";
 import { SessionManager, Session } from "./session.js";
 import { executeSlashCommand, AVAILABLE_SLASH_COMMANDS } from "./slash-commands.js";
-import { getShortVersion } from "./version.js";
+import { getShortVersion, SEMVER_VERSION, checkDiskVersionMismatch } from "./version.js";
 import { resolveDefaultAgyBinary } from "./antigravity-process.js";
 import { loadConversationTranscript, estimateReplayContextTokens } from "./transcript.js";
 import { normalizeToolCall, normalizeToolResult, extractPlanEntries } from "./tool-formatter.js";
@@ -116,7 +116,11 @@ export class ACPServer extends EventEmitter {
           this.emit("close");
         });
     });
-    logger.info("ACP Server started");
+    logger.info("ACP Server started", {
+      version: SEMVER_VERSION,
+      pid: process.pid,
+      cwd: process.cwd(),
+    });
   }
 
   private send(msg: unknown) {
@@ -676,6 +680,19 @@ export class ACPServer extends EventEmitter {
           // change received while the turn is running only applies after the
           // Antigravity process restarts for the next turn.
           const executingModel = session.model;
+
+          const versionCheck = checkDiskVersionMismatch();
+          if (versionCheck.outdated) {
+            logger.warn(
+              "Adapter process is running an outdated in-memory version compared to on-disk package; reload this agent ('paseo agent reload <id>') or restart Paseo to pick up changes",
+              {
+                inMemoryVersion: versionCheck.inMemoryVersion,
+                diskVersion: versionCheck.diskVersion,
+                pid: process.pid,
+                sessionId,
+              }
+            );
+          }
 
           try {
             session.touch();

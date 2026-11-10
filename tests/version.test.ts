@@ -4,6 +4,8 @@ import {
   getShortVersion,
   formatDiagnosticVersion,
   SEMVER_VERSION,
+  getDiskPackageVersion,
+  checkDiskVersionMismatch,
 } from "../src/version.js";
 
 describe("Automated Versioning & Diagnostic Metadata", () => {
@@ -30,5 +32,15 @@ describe("Automated Versioning & Diagnostic Metadata", () => {
     expect(diagnostic).toContain("Runtime: Node.js");
     expect(diagnostic).toContain("Features: Token Tracking, Context Meter, Quota Windows");
     expect(diagnostic).toContain("Supported Models: 8");
+  });
+
+  it("detects disk package version and checkDiskVersionMismatch reports accurately", () => {
+    const diskVer = getDiskPackageVersion();
+    expect(diskVer).toBe(SEMVER_VERSION);
+
+    const check = checkDiskVersionMismatch();
+    expect(check.outdated).toBe(false);
+    expect(check.diskVersion).toBe(SEMVER_VERSION);
+    expect(check.inMemoryVersion).toBe(SEMVER_VERSION);
   });
 });
