@@ -210,4 +210,40 @@ describe("Antigravity subprocess lifecycle", () => {
     expect(recovered.result?.response).toBe("recovered");
     await adapter.close();
   });
+
+  it("does not enforce inactivity timeout by default on long-running turns", async () => {
+    const origEnv = process.env.AGY_ACP_TURN_TIMEOUT_MS;
+    delete process.env.AGY_ACP_TURN_TIMEOUT_MS;
+    try {
+      const fake = makeFakeAgy({ responseDelayMs: 60 });
+      const adapter = new AntigravityProcess({ binaryPath: fake.fakeAgy, cwd: fake.dir, env: fake.env });
+
+      const res = await adapter.sendPrompt("long task without timeout");
+      expect(res.event).toBe("result");
+      expect(res.result?.status).toBe("SUCCESS");
+      await adapter.close();
+    } finally {
+      if (origEnv !== undefined) process.env.AGY_ACP_TURN_TIMEOUT_MS = origEnv;
+    }
+  });
+
+  it("honors explicit AGY_ACP_TURN_TIMEOUT_MS when configured", async () => {
+    const origEnv = process.env.AGY_ACP_TURN_TIMEOUT_MS;
+    process.env.AGY_ACP_TURN_TIMEOUT_MS = "40"; // 40ms timeout
+    try {
+      const fake = makeFakeAgy({ responseDelayMs: 150 });
+      const adapter = new AntigravityProcess({ binaryPath: fake.fakeAgy, cwd: fake.dir, env: fake.env });
+
+      await expect(adapter.sendPrompt("should hit custom timeout")).rejects.toThrow(
+        /Turn timed out after 0.04s of inactivity/
+      );
+      await adapter.close();
+    } finally {
+      if (origEnv !== undefined) {
+        process.env.AGY_ACP_TURN_TIMEOUT_MS = origEnv;
+      } else {
+        delete process.env.AGY_ACP_TURN_TIMEOUT_MS;
+      }
+    }
+  });
 });

@@ -518,6 +518,7 @@ export class AntigravityProcess extends EventEmitter {
     });
 
     child.stderr.on("data", (chunk: string) => {
+      this.emit("activity");
       stderrBuffer += chunk;
       const lines = stderrBuffer.split("\n");
       stderrBuffer = lines.pop() || "";
@@ -785,12 +786,14 @@ export class AntigravityProcess extends EventEmitter {
     let activityListener: (() => void) | null = null;
     let inactivityTimer: NodeJS.Timeout | null = null;
 
+    const envTimeout = process.env.AGY_ACP_TURN_TIMEOUT_MS;
     const turnTimeoutMs =
-      Number(process.env.AGY_ACP_TURN_TIMEOUT_MS) > 0
-        ? Number(process.env.AGY_ACP_TURN_TIMEOUT_MS)
-        : 15 * 60 * 1000; // 15 minutes default turn inactivity timeout
+      envTimeout !== undefined && Number(envTimeout) > 0
+        ? Number(envTimeout)
+        : 0; // Default to 0 (disabled). Do NOT kill long-running agent tasks arbitrarily.
 
     const resetInactivityTimer = () => {
+      if (turnTimeoutMs <= 0) return;
       if (inactivityTimer) clearTimeout(inactivityTimer);
       inactivityTimer = setTimeout(() => {
         logger.error("Turn timed out due to lack of activity from agy", {
@@ -863,19 +866,24 @@ export class AntigravityProcess extends EventEmitter {
         cleanupAndSettle(() => origReject(err));
       };
 
-      if (onStepUpdate) {
-        stepListener = (event: AgyStepUpdateEvent) => {
-          resetInactivityTimer();
-          onStepUpdate(event);
-        };
+      if (turnTimeoutMs > 0) {
+        if (onStepUpdate) {
+          stepListener = (event: AgyStepUpdateEvent) => {
+            resetInactivityTimer();
+            onStepUpdate(event);
+          };
+          this.on("step_update", stepListener);
+        }
+
+        activityListener = () => resetInactivityTimer();
+        this.on("activity", activityListener);
+
+        // Start initial inactivity timer
+        resetInactivityTimer();
+      } else if (onStepUpdate) {
+        stepListener = onStepUpdate;
         this.on("step_update", stepListener);
       }
-
-      activityListener = () => resetInactivityTimer();
-      this.on("activity", activityListener);
-
-      // Start initial inactivity timer
-      resetInactivityTimer();
 
       if (active.cancelled) {
         cleanupAndSettle(() => active.reject(new Error("Prompt turn cancelled before execution")));
