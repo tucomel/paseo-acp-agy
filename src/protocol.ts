@@ -612,6 +612,8 @@ export const ALL_THINKING_LEVELS: Record<string, { name: string; description: st
   low: { name: "Low", description: "Fast response with minimal reasoning latency" },
   medium: { name: "Medium", description: "Balanced reasoning effort and speed" },
   high: { name: "High", description: "Deep reasoning effort for complex tasks" },
+  xhigh: { name: "XHigh", description: "Extra-high reasoning effort for the hardest tasks" },
+  max: { name: "Max", description: "Maximum reasoning effort" },
 };
 
 export const FALLBACK_MODELS: ModelDefinition[] = [
@@ -646,11 +648,11 @@ export function parseAgyModelsOutput(rawOutput: string): ModelDefinition[] {
     if (parts.length < 2) continue;
     const modelId = parts[0];
     const label = parts[1];
-    const effortMatch = modelId.match(/-(high|medium|low)$/);
-    const baseId = effortMatch ? modelId.replace(/-(high|medium|low)$/, "") : modelId;
+    const effortMatch = modelId.match(/-(xhigh|max|high|medium|low)$/);
+    const baseId = effortMatch ? modelId.replace(/-(xhigh|max|high|medium|low)$/, "") : modelId;
     const effort = effortMatch ? effortMatch[1] : undefined;
     const cleanLabel = effortMatch
-      ? label.replace(/\s*\((High|Medium|Low)\)$/i, "").trim()
+      ? label.replace(/\s*\((XHigh|Max|High|Medium|Low)\)$/i, "").trim()
       : label;
 
     if (!modelsMap.has(baseId)) {
@@ -666,7 +668,13 @@ export function parseAgyModelsOutput(rawOutput: string): ModelDefinition[] {
       if (!entry.supportedEfforts.includes(effort)) entry.supportedEfforts.push(effort);
     }
   }
-  const result = Array.from(modelsMap.values());
+  let result = Array.from(modelsMap.values());
+  // Optional allowlist: AGY_ACP_ALLOWED_MODELS="model-a,model-b" limits the models exposed to the host.
+  const allowedRaw = process.env.AGY_ACP_ALLOWED_MODELS;
+  if (allowedRaw && allowedRaw.trim()) {
+    const allowed = new Set(allowedRaw.split(",").map((m) => m.trim()).filter(Boolean));
+    result = result.filter((m) => allowed.has(m.modelId));
+  }
   return result.length > 0 ? result : FALLBACK_MODELS;
 }
 

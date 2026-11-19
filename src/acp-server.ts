@@ -35,7 +35,7 @@ import { clearConversationQuotaErrors } from "./native-sessions.js";
 
 function splitModelAndEffort(modelInput?: string): { model?: string; effort?: string } {
   if (!modelInput) return {};
-  for (const effort of ["high", "medium", "low"] as const) {
+  for (const effort of ["xhigh", "max", "high", "medium", "low"] as const) {
     const suffix = `-${effort}`;
     if (modelInput.endsWith(suffix)) {
       return { model: modelInput.slice(0, -suffix.length), effort };
