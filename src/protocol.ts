@@ -616,6 +616,17 @@ export const ALL_THINKING_LEVELS: Record<string, { name: string; description: st
   max: { name: "Max", description: "Maximum reasoning effort" },
 };
 
+/**
+ * Optional allowlist: AGY_ACP_ALLOWED_MODELS="model-a,model-b" limits the models exposed to the host.
+ * Unset or empty means no filtering.
+ */
+export function applyModelAllowlist(models: ModelDefinition[]): ModelDefinition[] {
+  const allowedRaw = process.env.AGY_ACP_ALLOWED_MODELS;
+  if (!allowedRaw || !allowedRaw.trim()) return models;
+  const allowed = new Set(allowedRaw.split(",").map((m) => m.trim()).filter(Boolean));
+  return models.filter((m) => allowed.has(m.modelId));
+}
+
 export const FALLBACK_MODELS: ModelDefinition[] = [
   { modelId: "gemini-4-argon", name: "Gemini 4 Argon", description: "Google Gemini 4 Argon", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },
   { modelId: "gemini-3.8-flash", name: "Gemini 3.8 Flash", description: "Google Gemini 3.8 Flash", supportedEfforts: ["high", "medium", "low"], contextWindowMaxTokens: 1_048_576 },
@@ -668,14 +679,8 @@ export function parseAgyModelsOutput(rawOutput: string): ModelDefinition[] {
       if (!entry.supportedEfforts.includes(effort)) entry.supportedEfforts.push(effort);
     }
   }
-  let result = Array.from(modelsMap.values());
-  // Optional allowlist: AGY_ACP_ALLOWED_MODELS="model-a,model-b" limits the models exposed to the host.
-  const allowedRaw = process.env.AGY_ACP_ALLOWED_MODELS;
-  if (allowedRaw && allowedRaw.trim()) {
-    const allowed = new Set(allowedRaw.split(",").map((m) => m.trim()).filter(Boolean));
-    result = result.filter((m) => allowed.has(m.modelId));
-  }
-  return result.length > 0 ? result : FALLBACK_MODELS;
+  const result = applyModelAllowlist(Array.from(modelsMap.values()));
+  return result.length > 0 ? result : applyModelAllowlist(FALLBACK_MODELS);
 }
 
 export async function fetchAvailableModels(binaryPath: string = "agy", force = false): Promise<ModelDefinition[]> {
@@ -712,7 +717,7 @@ export async function fetchAvailableModels(binaryPath: string = "agy", force = f
           mergedMap.set(fallback.modelId, fallback);
         }
       }
-      const merged = Array.from(mergedMap.values());
+      const merged = applyModelAllowlist(Array.from(mergedMap.values()));
       cachedModels = merged;
       cachedModelsBinaryPath = binaryPath;
       lastModelFetch = Date.now();
@@ -721,10 +726,10 @@ export async function fetchAvailableModels(binaryPath: string = "agy", force = f
       logger.warn("Failed to fetch models from agy CLI, using fallback models", {
         error: (err as Error).message,
       });
-      cachedModels = FALLBACK_MODELS;
+      cachedModels = applyModelAllowlist(FALLBACK_MODELS);
       cachedModelsBinaryPath = binaryPath;
       lastModelFetch = Date.now();
-      return FALLBACK_MODELS;
+      return cachedModels;
     } finally {
       inFlightModelFetch = null;
     }

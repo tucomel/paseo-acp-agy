@@ -28,3 +28,13 @@ describe("agy models parsing: xhigh effort and allowlist", () => {
     expect(ids).toEqual(["gemini-4-hydrogen", "gemini-3.8-flash"]);
   });
 });
+
+describe("allowlist helper", () => {
+  afterEach(() => { delete process.env.AGY_ACP_ALLOWED_MODELS; });
+  it("keeps everything when unset and filters fallback models when set", async () => {
+    const { applyModelAllowlist, FALLBACK_MODELS } = await import("../src/protocol.js");
+    expect(applyModelAllowlist(FALLBACK_MODELS)).toHaveLength(FALLBACK_MODELS.length);
+    process.env.AGY_ACP_ALLOWED_MODELS = "gemini-3.8-flash";
+    expect(applyModelAllowlist(FALLBACK_MODELS).map((m) => m.modelId)).toEqual(["gemini-3.8-flash"]);
+  });
+});
