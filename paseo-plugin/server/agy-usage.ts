@@ -175,14 +175,60 @@ export function resolveAgyBinary(): string {
     return cachedAgyBin;
   }
 
-  const posixCandidates = [
-    home ? path.join(home, ".local", "bin", "agy") : "",
-    "/opt/homebrew/bin/agy",
-    "/usr/local/bin/agy",
-    "/usr/bin/agy",
-    home ? path.join(home, ".antigravity", "bin", "agy") : "",
-    home ? path.join(home, ".gemini", "antigravity-cli", "bin", "agy") : "",
-  ].filter(Boolean);
+  function getPosixAgyCandidates(homeDir: string): string[] {
+    const list: string[] = [
+      path.join(homeDir, ".local", "bin", "agy"),
+      path.join(homeDir, "bin", "agy"),
+      "/opt/homebrew/bin/agy",
+      "/usr/local/bin/agy",
+      "/usr/bin/agy",
+      path.join(homeDir, ".antigravity", "bin", "agy"),
+      path.join(homeDir, ".gemini", "antigravity-cli", "bin", "agy"),
+      path.join(homeDir, ".local", "share", "pnpm", "agy"),
+      path.join(homeDir, ".bun", "bin", "agy"),
+      path.join(homeDir, ".cargo", "bin", "agy"),
+      "/snap/bin/agy",
+      path.join(homeDir, ".npm-global", "bin", "agy"),
+      path.join(homeDir, ".fnm", "current", "bin", "agy"),
+      path.join(homeDir, ".local", "share", "fnm", "current", "bin", "agy"),
+      path.join(homeDir, ".asdf", "shims", "agy"),
+      path.join(homeDir, ".nodenv", "shims", "agy"),
+    ];
+
+    const nvmDir = path.join(homeDir, ".nvm", "versions", "node");
+    if (fs.existsSync(nvmDir)) {
+      try {
+        const vers = fs.readdirSync(nvmDir);
+        for (const ver of vers) {
+          list.push(path.join(nvmDir, ver, "bin", "agy"));
+        }
+      } catch {}
+    }
+
+    const nodenvDir = path.join(homeDir, ".nodenv", "versions");
+    if (fs.existsSync(nodenvDir)) {
+      try {
+        const vers = fs.readdirSync(nodenvDir);
+        for (const ver of vers) {
+          list.push(path.join(nodenvDir, ver, "bin", "agy"));
+        }
+      } catch {}
+    }
+
+    const asdfDir = path.join(homeDir, ".asdf", "installs", "nodejs");
+    if (fs.existsSync(asdfDir)) {
+      try {
+        const vers = fs.readdirSync(asdfDir);
+        for (const ver of vers) {
+          list.push(path.join(asdfDir, ver, "bin", "agy"));
+        }
+      } catch {}
+    }
+
+    return list;
+  }
+
+  const posixCandidates = home ? getPosixAgyCandidates(home) : [];
 
   for (const cand of posixCandidates) {
     if (fs.existsSync(cand)) {
@@ -210,23 +256,46 @@ function buildExecEnv(): NodeJS.ProcessEnv {
   const home = os.homedir();
   const isWin = process.platform === "win32";
   const env: NodeJS.ProcessEnv = { ...process.env };
-  const extraPaths = isWin
-    ? [
-        home ? path.join(home, ".local", "bin") : "",
-        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs", "Antigravity", "bin") : "",
-      ].filter((p) => p && fs.existsSync(p))
-    : [
-        home ? path.join(home, ".local", "bin") : "",
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        home ? path.join(home, ".antigravity", "bin") : "",
-        home ? path.join(home, ".gemini", "antigravity-cli", "bin") : "",
-      ].filter((p) => p && fs.existsSync(p));
+  const extraPaths: string[] = [];
 
-  if (extraPaths.length > 0) {
+  if (isWin) {
+    if (home) extraPaths.push(path.join(home, ".local", "bin"));
+    if (process.env.LOCALAPPDATA) extraPaths.push(path.join(process.env.LOCALAPPDATA, "Programs", "Antigravity", "bin"));
+  } else if (home) {
+    extraPaths.push(
+      path.join(home, ".local", "bin"),
+      path.join(home, "bin"),
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+      path.join(home, ".antigravity", "bin"),
+      path.join(home, ".gemini", "antigravity-cli", "bin"),
+      path.join(home, ".local", "share", "pnpm"),
+      path.join(home, ".bun", "bin"),
+      path.join(home, ".cargo", "bin"),
+      "/snap/bin",
+      path.join(home, ".npm-global", "bin"),
+      path.join(home, ".fnm", "current", "bin"),
+      path.join(home, ".local", "share", "fnm", "current", "bin"),
+      path.join(home, ".asdf", "shims"),
+      path.join(home, ".nodenv", "shims")
+    );
+    const nvmDir = path.join(home, ".nvm", "versions", "node");
+    if (fs.existsSync(nvmDir)) {
+      try {
+        const vers = fs.readdirSync(nvmDir);
+        for (const ver of vers) {
+          extraPaths.push(path.join(nvmDir, ver, "bin"));
+        }
+      } catch {}
+    }
+  }
+
+  const validPaths = extraPaths.filter((p) => p && fs.existsSync(p));
+
+  if (validPaths.length > 0) {
     const sep = path.delimiter;
     const current = env.PATH || env.Path || "";
-    const merged = (current ? current + sep : "") + extraPaths.join(sep);
+    const merged = (current ? current + sep : "") + validPaths.join(sep);
     env.PATH = merged;
     if (isWin) env.Path = merged;
   }
@@ -653,9 +722,9 @@ export function resolveSessionTelemetry(
   };
 }
 
-export function createAntigravityUsageSource() {
+export function createAntigravityUsageSource(sourceId = "antigravity") {
   return {
-    id: "antigravity-acp",
+    id: sourceId,
     label: "Antigravity",
     icon: "icon.svg",
     input: z.object({}).passthrough(),
@@ -684,8 +753,8 @@ export function createAntigravityUsageSource() {
         };
       }
       return {
-        status: "error" as const,
-        error: report.error ?? "Unable to fetch Antigravity quota",
+        status: "unavailable" as const,
+        problem: { kind: "no_quota" as const, detail: report.error ?? "Antigravity quota unavailable" },
       };
     },
   };

@@ -16,7 +16,7 @@ export function getDiskPackageVersion(): string {
   } catch {
     // ignore
   }
-  return "1.2.2";
+  return "1.3.8";
 }
 
 export const SEMVER_VERSION = getDiskPackageVersion();

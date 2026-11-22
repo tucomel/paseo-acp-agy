@@ -690,12 +690,31 @@ function resolveAgyBinary() {
     } else {
         const posixCandidates = [
             path.join(home, ".local", "bin", "agy"),
+            path.join(home, "bin", "agy"),
             "/opt/homebrew/bin/agy",
             "/usr/local/bin/agy",
             "/usr/bin/agy",
             path.join(home, ".antigravity", "bin", "agy"),
             path.join(home, ".gemini", "antigravity-cli", "bin", "agy"),
+            path.join(home, ".local", "share", "pnpm", "agy"),
+            path.join(home, ".bun", "bin", "agy"),
+            path.join(home, ".cargo", "bin", "agy"),
+            "/snap/bin/agy",
+            path.join(home, ".npm-global", "bin", "agy"),
+            path.join(home, ".fnm", "current", "bin", "agy"),
+            path.join(home, ".local", "share", "fnm", "current", "bin", "agy"),
+            path.join(home, ".asdf", "shims", "agy"),
+            path.join(home, ".nodenv", "shims", "agy"),
         ];
+        const nvmDir = path.join(home, ".nvm", "versions", "node");
+        if (fs.existsSync(nvmDir)) {
+            try {
+                const vers = fs.readdirSync(nvmDir);
+                for (const ver of vers) {
+                    posixCandidates.push(path.join(nvmDir, ver, "bin", "agy"));
+                }
+            } catch {}
+        }
         for (const cand of posixCandidates) {
             if (fs.existsSync(cand)) {
                 cachedAgyBin = cand;
@@ -761,15 +780,37 @@ export async function fetchAntigravityUsage() {
         const home = os.homedir();
         const extraPosixPaths = !isWin ? [
             home ? path.join(home, ".local", "bin") : "",
+            home ? path.join(home, "bin") : "",
             "/opt/homebrew/bin",
             "/usr/local/bin",
             home ? path.join(home, ".antigravity", "bin") : "",
             home ? path.join(home, ".gemini", "antigravity-cli", "bin") : "",
-        ].filter(p => p && fs.existsSync(p)) : [];
+            home ? path.join(home, ".local", "share", "pnpm") : "",
+            home ? path.join(home, ".bun", "bin") : "",
+            home ? path.join(home, ".cargo", "bin") : "",
+            "/snap/bin",
+            home ? path.join(home, ".npm-global", "bin") : "",
+            home ? path.join(home, ".fnm", "current", "bin") : "",
+            home ? path.join(home, ".local", "share", "fnm", "current", "bin") : "",
+            home ? path.join(home, ".asdf", "shims") : "",
+            home ? path.join(home, ".nodenv", "shims") : "",
+        ] : [];
+        if (!isWin && home) {
+            const nvmDir = path.join(home, ".nvm", "versions", "node");
+            if (fs.existsSync(nvmDir)) {
+                try {
+                    const vers = fs.readdirSync(nvmDir);
+                    for (const ver of vers) {
+                        extraPosixPaths.push(path.join(nvmDir, ver, "bin"));
+                    }
+                } catch {}
+            }
+        }
+        const validPosixPaths = extraPosixPaths.filter(p => p && fs.existsSync(p));
         const env = { ...process.env };
-        if (extraPosixPaths.length > 0) {
+        if (validPosixPaths.length > 0) {
             const sep = path.delimiter;
-            env.PATH = (env.PATH ? env.PATH + sep : "") + extraPosixPaths.join(sep);
+            env.PATH = (env.PATH ? env.PATH + sep : "") + validPosixPaths.join(sep);
         }
 
         let usageOut = "";
@@ -928,6 +969,13 @@ export async function fetchAntigravityUsage() {
             tone: remainingCredits > 0 ? "ok" : "default",
         });
 
+        if (windows.length === 0 && balances.length === 0) {
+            return {
+                status: "unavailable",
+                problem: { kind: "no_quota", detail: "No Antigravity usage quota reported" },
+            };
+        }
+
         const result = {
             status: "available",
             planLabel: "Google Gemini",
@@ -941,8 +989,8 @@ export async function fetchAntigravityUsage() {
     } catch (err) {
         if (lastSuccessfulPluginQuota) return lastSuccessfulPluginQuota;
         return {
-            status: "error",
-            error: err instanceof Error ? err.message : String(err),
+            status: "unavailable",
+            problem: { kind: "no_quota", detail: err instanceof Error ? err.message : String(err) },
         };
     }
 }
@@ -1030,7 +1078,100 @@ export function patchPaseoServer(serverDir: string): { success: boolean; changes
         let indexCode = fs.readFileSync(indexFile, "utf-8");
         let indexModified = false;
 
-        if (!indexCode.includes("registerAntigravityUsageSource")) {
+        if (indexCode.includes("usage.registration()")) {
+          // PR #8719 architecture: usage source is registered via usage.registration().
+          // Ensure internal/usage has robust global discovery and fallback launch
+          const internalUsageCandidates = [
+            path.join(pluginDir, "server", "internal", "usage.ts"),
+            path.join(pluginDir, "server", "internal", "usage.js"),
+          ].filter((f) => fs.existsSync(f));
+
+          for (const internalFile of internalUsageCandidates) {
+            let code = fs.readFileSync(internalFile, "utf-8");
+            let modified = false;
+
+            if (code.includes("return [...this.launches.keys()].map")) {
+              code = code.replace(
+                "return [...this.launches.keys()].map",
+                "const accounts = [...this.launches.keys()];\n        if (accounts.length === 0) {\n          const defaultAccount = this.accountKey([], process.env);\n          return [{ key: defaultAccount, label: \"Antigravity\", input: { account: defaultAccount } }];\n        }\n        return accounts.map"
+              );
+              modified = true;
+            }
+
+            if (code.includes("const launch = this.launches.get(account);\n        if (!launch) throw new Error(\"Antigravity login store no longer exists\");")) {
+              const fallbackLaunch = `let launch = this.launches.get(account);
+        if (!launch) {
+          const _fs = require("node:fs");
+          const _path = require("node:path");
+          const _os = require("node:os");
+          const _home = _os.homedir();
+          const _env = { ...process.env };
+          const _extra = [];
+          if (process.platform === "win32") {
+            if (_home) _extra.push(_path.join(_home, ".local", "bin"));
+          } else if (_home) {
+            _extra.push(
+              _path.join(_home, ".local", "bin"),
+              _path.join(_home, "bin"),
+              "/opt/homebrew/bin",
+              "/usr/local/bin",
+              _path.join(_home, ".antigravity", "bin"),
+              _path.join(_home, ".gemini", "antigravity-cli", "bin"),
+              _path.join(_home, ".local", "share", "pnpm"),
+              _path.join(_home, ".bun", "bin"),
+              _path.join(_home, ".cargo", "bin"),
+              "/snap/bin",
+              _path.join(_home, ".npm-global", "bin"),
+              _path.join(_home, ".fnm", "current", "bin"),
+              _path.join(_home, ".local", "share", "fnm", "current", "bin"),
+              _path.join(_home, ".asdf", "shims"),
+              _path.join(_home, ".nodenv", "shims")
+            );
+            const _nvmDir = _path.join(_home, ".nvm", "versions", "node");
+            if (_fs.existsSync(_nvmDir)) {
+              try {
+                const _vers = _fs.readdirSync(_nvmDir);
+                for (const _v of _vers) _extra.push(_path.join(_nvmDir, _v, "bin"));
+              } catch {}
+            }
+          }
+          const _valid = _extra.filter((p) => p && _fs.existsSync(p));
+          if (_valid.length > 0) {
+            const _sep = _path.delimiter;
+            _env.PATH = (_env.PATH ? _env.PATH + _sep : "") + _valid.join(_sep);
+          }
+          let _cmd = "agy";
+          if (process.env.AGY_BIN_PATH && _fs.existsSync(process.env.AGY_BIN_PATH)) {
+            _cmd = process.env.AGY_BIN_PATH;
+          } else {
+            for (const _p of _valid) {
+              const _t = _path.join(_p, "agy");
+              if (_fs.existsSync(_t)) { _cmd = _t; break; }
+            }
+          }
+          launch = { command: _cmd, args: [], env: _env };
+        }`;
+              code = code.replace(
+                "const launch = this.launches.get(account);\n        if (!launch) throw new Error(\"Antigravity login store no longer exists\");",
+                fallbackLaunch
+              );
+              modified = true;
+            }
+
+            if (code.includes('return {\n        status: "error",\n        error: reason instanceof Error ? reason.message : String(reason),\n      };')) {
+              code = code.replace(
+                'return {\n        status: "error",\n        error: reason instanceof Error ? reason.message : String(reason),\n      };',
+                'return unavailable({\n        kind: "no_quota",\n        detail: reason instanceof Error ? reason.message : String(reason),\n      });'
+              );
+              modified = true;
+            }
+
+            if (modified) {
+              fs.writeFileSync(internalFile, code, "utf-8");
+              changes.push(`Patched ${internalFile} with global discovery and fallback launch`);
+            }
+          }
+        } else if (!indexCode.includes("registerAntigravityUsageSource")) {
           // Add import
           if (!indexCode.includes('from "./server/usage.js"')) {
             indexCode = `import { registerAntigravityUsageSource } from "./server/usage.js";\n` + indexCode;
@@ -1946,6 +2087,8 @@ export function isPaseoServerPatched(serverDir: string): boolean {
       const usageFile = [
         path.join(pluginDir, "server", "usage.ts"),
         path.join(pluginDir, "server", "usage.js"),
+        path.join(pluginDir, "server", "internal", "usage.ts"),
+        path.join(pluginDir, "server", "internal", "usage.js"),
       ].find((f) => fs.existsSync(f));
       if (!usageFile) return false;
       const usageContent = fs.readFileSync(usageFile, "utf-8");
@@ -1958,7 +2101,7 @@ export function isPaseoServerPatched(serverDir: string): boolean {
       if (!indexFile) return false;
 
       const indexContent = fs.readFileSync(indexFile, "utf-8");
-      if (!indexContent.includes("registerAntigravityUsageSource")) return false;
+      if (!indexContent.includes("registerAntigravityUsageSource") && !indexContent.includes("usage.registration()")) return false;
     } else {
       // Paseo <= 0.10 legacy architecture
       const antigravityJsCandidates = [

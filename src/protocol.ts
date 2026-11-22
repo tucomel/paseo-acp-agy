@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { logger } from "./logger.js";
@@ -214,6 +215,158 @@ export function mapToolNameToKind(toolName: string): ToolKind {
   return "other";
 }
 
+export const REVIEW_LINE_MARKERS = { add: "+", remove: "-", context: " " } as const;
+
+function padLineNumber(lineNumber: number | null | undefined): string {
+  return (lineNumber?.toString() ?? "-").padStart(2);
+}
+
+export function formatReviewBlock(b: Record<string, unknown>): string {
+  const mode = b.mode as string | undefined;
+  const baseRef = b.baseRef as string | undefined;
+  const cwd = (b.cwd as string | undefined) || "";
+  const scope = mode === "base" && baseRef ? `diff against ${baseRef}` : "uncommitted changes";
+  const lines: string[] = [`Code review (${scope}${cwd ? ` in ${cwd}` : ""}):`];
+  const comments = Array.isArray(b.comments) ? (b.comments as Array<Record<string, any>>) : [];
+  comments.forEach((comment, index) => {
+    lines.push(
+      "",
+      `Comment ${index + 1}: ${comment.filePath}:${comment.side}:${comment.lineNumber}`,
+      comment.body || "",
+      comment.context?.hunkHeader || ""
+    );
+    const target = comment.context?.targetLine;
+    const diffLines = Array.isArray(comment.context?.lines) ? comment.context.lines : [];
+    for (const line of diffLines) {
+      const isTarget =
+        target &&
+        line.oldLineNumber === target.oldLineNumber &&
+        line.newLineNumber === target.newLineNumber &&
+        line.type === target.type &&
+        line.content === target.content;
+      const prefix = isTarget ? "> " : "  ";
+      const oldLn = padLineNumber(line.oldLineNumber);
+      const newLn = padLineNumber(line.newLineNumber);
+      const marker = (REVIEW_LINE_MARKERS as any)[line.type] || " ";
+      lines.push(`${prefix}${oldLn} ${newLn} ${marker}${line.content}`);
+    }
+  });
+  return lines.join("\n");
+}
+
+export function formatIssueBlock(b: Record<string, unknown>): string {
+  const number = b.number;
+  const title = b.title || "";
+  const url = b.url || "";
+  const body = typeof b.body === "string" ? b.body.trim() : "";
+  const header = `Issue #${number}: ${title}${url ? `\nURL: ${url}` : ""}`;
+  return body ? `${header}\n\n${body}` : header;
+}
+
+export function formatPullRequestBlock(b: Record<string, unknown>): string {
+  const number = b.number;
+  const title = b.title || "";
+  const url = b.url || "";
+  const head = b.headRefName;
+  const base = b.baseRefName;
+  const refs = head && base ? ` (${head} -> ${base})` : "";
+  const header = `Pull Request #${number}: ${title}${refs}${url ? `\nURL: ${url}` : ""}`;
+  const body = typeof b.body === "string" ? b.body.trim() : "";
+  return body ? `${header}\n\n${body}` : header;
+}
+
+export function formatUploadedFileBlock(b: Record<string, unknown>): string {
+  const fileName = b.fileName || (typeof b.path === "string" ? path.basename(b.path) : "file");
+  const mimeType = b.mimeType ? ` (${b.mimeType})` : "";
+  return `[Attached File: ${fileName}${mimeType}]\nPath: ${b.path}`;
+}
+
+function findStartingLabel(remaining: string, sortedLabels: string[]): string | null {
+  for (const label of sortedLabels) {
+    if (
+      remaining === label ||
+      remaining.startsWith(label + ",") ||
+      remaining.startsWith(label + ", ")
+    ) {
+      return label;
+    }
+  }
+  return null;
+}
+
+function findNextLabelIndex(remaining: string, sortedLabels: string[]): number {
+  let nextKnownIdx = -1;
+  for (const label of sortedLabels) {
+    const idxCommaSpace = remaining.indexOf(", " + label);
+    const idxComma = remaining.indexOf("," + label);
+    let candidateIdx = -1;
+    let sepLen = 1;
+    if (idxCommaSpace !== -1 && (idxComma === -1 || idxCommaSpace <= idxComma)) {
+      candidateIdx = idxCommaSpace;
+      sepLen = 2;
+    } else if (idxComma !== -1) {
+      candidateIdx = idxComma;
+      sepLen = 1;
+    }
+    if (candidateIdx !== -1 && (nextKnownIdx === -1 || candidateIdx < nextKnownIdx)) {
+      nextKnownIdx = candidateIdx + sepLen;
+    }
+  }
+  return nextKnownIdx;
+}
+
+export function decodeMultiSelectString(rawValue: string, knownLabels?: Set<string>): string[] {
+  const trimmed = rawValue.trim();
+  if (!trimmed) return [];
+  if (!knownLabels || knownLabels.size === 0) {
+    return trimmed
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  if (knownLabels.has(trimmed)) {
+    return [trimmed];
+  }
+
+  const sortedLabels = [...knownLabels].sort((a, b) => b.length - a.length);
+  const results: string[] = [];
+  let remaining = trimmed;
+
+  while (remaining.length > 0) {
+    const matched = findStartingLabel(remaining, sortedLabels);
+    if (matched !== null) {
+      results.push(matched);
+      remaining = remaining.slice(matched.length).replace(/^,\s*/, "").trim();
+      continue;
+    }
+
+    const nextKnownIdx = findNextLabelIndex(remaining, sortedLabels);
+    if (nextKnownIdx !== -1) {
+      const prefixPart = remaining.slice(0, nextKnownIdx).trim();
+      if (prefixPart) {
+        for (const part of prefixPart
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)) {
+          results.push(part);
+        }
+      }
+      remaining = remaining.slice(nextKnownIdx).replace(/^,\s*/, "").trim();
+    } else {
+      for (const part of remaining
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)) {
+        results.push(part);
+      }
+      break;
+    }
+  }
+
+  return results;
+}
+
 export function extractPromptText(promptInput: unknown): string {
   if (typeof promptInput === "string") {
     const trimmed = promptInput.trim();
@@ -233,7 +386,30 @@ export function extractPromptText(promptInput: unknown): string {
 
     const b = block as Record<string, unknown>;
     if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
-      textParts.push(b.text.trim());
+      const ext = b.externalResource as { title?: string; url?: string } | undefined;
+      const title = (typeof b.title === "string" && b.title.trim()) || ext?.title || "";
+      const url = ext?.url ? ` (${ext.url})` : "";
+      if (title || url) {
+        textParts.push(`[${title || "Context"}${url}]\n${b.text.trim()}`);
+      } else {
+        textParts.push(b.text.trim());
+      }
+      return;
+    }
+    if (b.type === "review") {
+      textParts.push(formatReviewBlock(b));
+      return;
+    }
+    if (b.type === "github_issue" || b.type === "forge_issue") {
+      textParts.push(formatIssueBlock(b));
+      return;
+    }
+    if (b.type === "github_pr" || b.type === "forge_change_request") {
+      textParts.push(formatPullRequestBlock(b));
+      return;
+    }
+    if (b.type === "uploaded_file") {
+      textParts.push(formatUploadedFileBlock(b));
       return;
     }
     if (b.type === "image") {

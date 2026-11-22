@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { normalizeToolCall, normalizeToolResult, extractPlanEntries } from "../src/tool-formatter.js";
+import { decodeMultiSelectString } from "../src/protocol.js";
 
 describe("Tool Formatter & Visual Enhancements", () => {
   it("normalizes run_command with descriptive title, execute kind, and command parameter", () => {
@@ -175,5 +176,22 @@ Here is my plan:
 
   it("returns null for text without checklist items", () => {
     expect(extractPlanEntries("Just normal assistant reply.")).toBeNull();
+  });
+
+  it("decodes multi-select strings accurately even when options contain commas", () => {
+    const knownLabels = new Set([
+      "Option 1",
+      "Option 2, with comma",
+      "Option 3",
+    ]);
+
+    const decoded = decodeMultiSelectString("Option 1, Option 2, with comma, Option 3", knownLabels);
+    expect(decoded).toEqual(["Option 1", "Option 2, with comma", "Option 3"]);
+
+    const single = decodeMultiSelectString("Option 2, with comma", knownLabels);
+    expect(single).toEqual(["Option 2, with comma"]);
+
+    const fallback = decodeMultiSelectString("Alpha, Beta, Gamma");
+    expect(fallback).toEqual(["Alpha", "Beta", "Gamma"]);
   });
 });

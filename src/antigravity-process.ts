@@ -28,6 +28,71 @@ export function isWindowsBatchScript(filePath: string): boolean {
   return /\.(cmd|bat)$/i.test(filePath);
 }
 
+export function findPosixAgyCandidates(home: string): string[] {
+  const candidates: string[] = [
+    path.join(home, ".local", "bin", "agy"),
+    path.join(home, "bin", "agy"),
+    "/opt/homebrew/bin/agy",
+    "/usr/local/bin/agy",
+    "/usr/bin/agy",
+    path.join(home, ".antigravity", "bin", "agy"),
+    path.join(home, ".gemini", "antigravity-cli", "bin", "agy"),
+    path.join(home, ".local", "share", "pnpm", "agy"),
+    path.join(home, ".bun", "bin", "agy"),
+    path.join(home, ".cargo", "bin", "agy"),
+    "/snap/bin/agy",
+    path.join(home, ".npm-global", "bin", "agy"),
+    path.join(home, ".fnm", "current", "bin", "agy"),
+    path.join(home, ".local", "share", "fnm", "current", "bin", "agy"),
+    path.join(home, ".asdf", "shims", "agy"),
+    path.join(home, ".nodenv", "shims", "agy"),
+  ];
+
+  const nvmVersionsDir = path.join(home, ".nvm", "versions", "node");
+  if (fs.existsSync(nvmVersionsDir)) {
+    try {
+      const vers = fs.readdirSync(nvmVersionsDir);
+      for (const ver of vers) {
+        candidates.push(path.join(nvmVersionsDir, ver, "bin", "agy"));
+      }
+    } catch {}
+  }
+
+  const nodenvVersionsDir = path.join(home, ".nodenv", "versions");
+  if (fs.existsSync(nodenvVersionsDir)) {
+    try {
+      const vers = fs.readdirSync(nodenvVersionsDir);
+      for (const ver of vers) {
+        candidates.push(path.join(nodenvVersionsDir, ver, "bin", "agy"));
+      }
+    } catch {}
+  }
+
+  const asdfNodeDir = path.join(home, ".asdf", "installs", "nodejs");
+  if (fs.existsSync(asdfNodeDir)) {
+    try {
+      const vers = fs.readdirSync(asdfNodeDir);
+      for (const ver of vers) {
+        candidates.push(path.join(asdfNodeDir, ver, "bin", "agy"));
+      }
+    } catch {}
+  }
+
+  return candidates;
+}
+
+export function buildPosixExtraPaths(home: string): string[] {
+  const dirs = new Set<string>();
+  const candidates = findPosixAgyCandidates(home);
+  for (const c of candidates) {
+    const dir = path.dirname(c);
+    if (fs.existsSync(dir)) {
+      dirs.add(dir);
+    }
+  }
+  return [...dirs];
+}
+
 export function resolveDefaultAgyBinary(force = false): string {
   const now = Date.now();
   if (
@@ -148,14 +213,7 @@ export function resolveDefaultAgyBinary(force = false): string {
           }
         }
       } else {
-        const posixCandidates = [
-          path.join(home, ".local", "bin", "agy"),
-          "/opt/homebrew/bin/agy",
-          "/usr/local/bin/agy",
-          "/usr/bin/agy",
-          path.join(home, ".antigravity", "bin", "agy"),
-          path.join(home, ".gemini", "antigravity-cli", "bin", "agy"),
-        ];
+        const posixCandidates = findPosixAgyCandidates(home);
         for (const cand of posixCandidates) {
           if (fs.existsSync(cand)) {
             resolved = cand;
@@ -203,6 +261,7 @@ export class AntigravityProcess extends EventEmitter {
   private needsRestart = false;
   private transitionPromise: Promise<void> | null = null;
   private currentTurnPromise: ActiveTurn | null = null;
+  private recentStderrLines: string[] = [];
 
   public initialInfo: AgyInitEvent["init"] | null = null;
 
@@ -216,6 +275,16 @@ export class AntigravityProcess extends EventEmitter {
     this.conversationId = options.conversationId;
     this.permissions = options.permissions || resolvePermissionSettings();
     this.env = { ...process.env, ...options.env };
+
+    const home = os.homedir();
+    if (process.platform !== "win32" && home) {
+      const extraPaths = buildPosixExtraPaths(home);
+      if (extraPaths.length > 0) {
+        const sep = path.delimiter;
+        const current = this.env.PATH || this.env.Path || "";
+        this.env.PATH = (current ? current + sep : "") + extraPaths.join(sep);
+      }
+    }
 
     // EventEmitter treats "error" specially. Keep a defensive listener for
     // callers/tests that emit it directly; child failures use process_error.
@@ -496,7 +565,7 @@ export class AntigravityProcess extends EventEmitter {
     child.stderr.setEncoding("utf-8");
     let stdoutBuffer = "";
     let stderrBuffer = "";
-    const recentStderrLines: string[] = [];
+    this.recentStderrLines = [];
 
     child.stdout.on("data", (chunk: string) => {
       this.emit("activity");
@@ -526,8 +595,8 @@ export class AntigravityProcess extends EventEmitter {
         const trimmed = line.trim();
         if (trimmed) {
           logger.warn("agy stderr: " + trimmed);
-          recentStderrLines.push(trimmed);
-          if (recentStderrLines.length > 20) recentStderrLines.shift();
+          this.recentStderrLines.push(trimmed);
+          if (this.recentStderrLines.length > 20) this.recentStderrLines.shift();
         }
       }
     });
@@ -544,13 +613,10 @@ export class AntigravityProcess extends EventEmitter {
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       logger.info("agy process exited", { code, signal, pid: child.pid });
       if (stderrBuffer.trim()) {
-        recentStderrLines.push(stderrBuffer.trim());
-        if (recentStderrLines.length > 20) recentStderrLines.shift();
+        this.recentStderrLines.push(stderrBuffer.trim());
+        if (this.recentStderrLines.length > 20) this.recentStderrLines.shift();
       }
-      const stderrDiagnostic = recentStderrLines.join(" ").trim();
-      const exitDiagnostic = stderrDiagnostic
-        ? `agy process exited prematurely with code ${code} signal ${signal}: ${stderrDiagnostic}`
-        : `agy process exited prematurely with code ${code} signal ${signal}`;
+      const exitDiagnostic = this.getExitDiagnostic(code, signal);
 
       if (this.currentTurnPromise?.child === child) {
         const turn = this.currentTurnPromise;
@@ -577,6 +643,17 @@ export class AntigravityProcess extends EventEmitter {
       }
       this.emit("exit", { code, signal, pid: child.pid });
     });
+  }
+
+  private getExitDiagnostic(code: number | null, signal: NodeJS.Signals | null): string {
+    const stderrDiagnostic = this.recentStderrLines.join(" ").trim();
+    let exitDiagnostic = stderrDiagnostic
+      ? `agy process exited prematurely with code ${code} signal ${signal}: ${stderrDiagnostic}`
+      : `agy process exited prematurely with code ${code} signal ${signal}`;
+    if (/trajectory.*not found/i.test(exitDiagnostic)) {
+      exitDiagnostic = "Antigravity session trajectory has expired upstream. Start a new conversation to continue.";
+    }
+    return exitDiagnostic;
   }
 
   private handleEvent(event: AgyIncomingEvent, child: ChildProcess) {
@@ -688,7 +765,6 @@ export class AntigravityProcess extends EventEmitter {
         this.off("result", onResult);
         child.off("error", onError);
         child.off("close", onClose);
-        child.off("exit", onExit);
         clearTimeout(timer);
       };
       const finishReject = (err: Error) => {
@@ -728,10 +804,10 @@ export class AntigravityProcess extends EventEmitter {
         }
       };
       const onError = (err: Error) => finishReject(err);
-      const onClose = (code: number | null, signal: NodeJS.Signals | null) =>
-        finishReject(new Error(`Antigravity exited before initialization: code=${code} signal=${signal}`));
-      const onExit = (code: number | null, signal: NodeJS.Signals | null) =>
-        finishReject(new Error(`Antigravity exited before initialization: code=${code} signal=${signal}`));
+      const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+        const diag = this.getExitDiagnostic(code, signal);
+        finishReject(new Error(diag));
+      };
       const timer = setTimeout(() => {
         if (settled) return;
         cleanup();
@@ -746,7 +822,6 @@ export class AntigravityProcess extends EventEmitter {
       this.on("result", onResult);
       child.once("error", onError);
       child.once("close", onClose);
-      child.once("exit", onExit);
 
       if (this.initialInfo !== null) {
         onInit({

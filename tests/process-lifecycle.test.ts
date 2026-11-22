@@ -2,7 +2,11 @@ import { describe, it, expect, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { AntigravityProcess } from "../src/antigravity-process.js";
+import {
+  AntigravityProcess,
+  findPosixAgyCandidates,
+  buildPosixExtraPaths,
+} from "../src/antigravity-process.js";
 
 const tempDirs: string[] = [];
 
@@ -245,5 +249,35 @@ describe("Antigravity subprocess lifecycle", () => {
         delete process.env.AGY_ACP_TURN_TIMEOUT_MS;
       }
     }
+  });
+
+  it("finds POSIX candidates across Linux / server paths including nvm and pnpm", () => {
+    const candidates = findPosixAgyCandidates("/home/testuser");
+    expect(candidates).toContain("/home/testuser/.local/bin/agy");
+    expect(candidates).toContain("/usr/local/bin/agy");
+    expect(candidates).toContain("/home/testuser/.local/share/pnpm/agy");
+    expect(candidates).toContain("/snap/bin/agy");
+
+    const extraPaths = buildPosixExtraPaths(os.homedir());
+    expect(Array.isArray(extraPaths)).toBe(true);
+  });
+
+  it("classifies expired trajectory failures cleanly", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-traj-"));
+    tempDirs.push(dir);
+    const fakeAgy = path.join(dir, "fake-agy.mjs");
+    fs.writeFileSync(
+      fakeAgy,
+      `#!/usr/bin/env node\n` +
+        `console.error("not_found: trajectory not found: conv_123: not found");\n` +
+        `process.exit(1);\n`
+    );
+    fs.chmodSync(fakeAgy, 0o755);
+
+    const adapter = new AntigravityProcess({ binaryPath: fakeAgy, cwd: dir });
+    await expect(adapter.sendPrompt("test expired session")).rejects.toThrow(
+      "Antigravity session trajectory has expired upstream. Start a new conversation to continue."
+    );
+    await adapter.close();
   });
 });

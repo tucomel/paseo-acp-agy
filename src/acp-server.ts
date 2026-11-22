@@ -23,6 +23,7 @@ import {
   roundUsageCostUsd,
   getModelContextWindow,
   fetchAntigravityUsage,
+  decodeMultiSelectString,
 } from "./protocol.js";
 import { SessionManager, Session } from "./session.js";
 import { executeSlashCommand, AVAILABLE_SLASH_COMMANDS } from "./slash-commands.js";
@@ -840,11 +841,30 @@ export class ACPServer extends EventEmitter {
                     }).then((permRes: any) => {
                       logger.info("Interactive question answered in Paseo", { permRes });
                       const outcome = permRes?.outcome;
+                      if (outcome?.optionId === "cancel" || outcome?.interrupt === true) {
+                        logger.info("Interactive question cancelled or interrupted by user; cancelling turn", { outcome });
+                        session.cancelTurn();
+                        return;
+                      }
                       let answerText = "";
                       if (outcome?._meta?.answers && typeof outcome._meta.answers === "object") {
-                        answerText = Object.entries(outcome._meta.answers)
-                          .map(([k, v]) => `• **${k}**: ${v}`)
-                          .join("\n");
+                        const answerEntries = Object.entries(outcome._meta.answers);
+                        const formattedList: string[] = [];
+                        for (const [k, v] of answerEntries) {
+                          const matchingQ = rawQuestions.find((q) => q.question === k);
+                          if (matchingQ?.is_multi_select && typeof v === "string" && Array.isArray(matchingQ.options)) {
+                            const knownSet = new Set(
+                              matchingQ.options.map((opt) =>
+                                typeof opt === "string" ? opt.replace(/^\(Recommended\)\s*/i, "").trim() : String(opt)
+                              )
+                            );
+                            const decoded = decodeMultiSelectString(v, knownSet);
+                            formattedList.push(`• **${k}**: ${decoded.join(", ")}`);
+                          } else {
+                            formattedList.push(`• **${k}**: ${v}`);
+                          }
+                        }
+                        answerText = formattedList.join("\n");
                       } else if (outcome?.optionId && outcome.optionId !== "cancel") {
                         const matched = options.find((o) => o.optionId === outcome.optionId);
                         answerText = matched ? matched.name : outcome.optionId;
@@ -864,6 +884,9 @@ export class ACPServer extends EventEmitter {
                       }
                     }).catch((err) => {
                       logger.debug("Interactive question cancelled or dismissed", { error: (err as Error).message });
+                      if (err && typeof err === "object" && (err.interrupt === true || err.cancelled === true)) {
+                        session.cancelTurn();
+                      }
                     });
                   }
                 } else if (step.state === "DONE") {
@@ -1051,7 +1074,10 @@ export class ACPServer extends EventEmitter {
                 this.scheduleUsagePublishBurst(session.id, [25, 150]);
               }
             } catch (promptErr) {
-              const errorMsg = (promptErr as Error).message || "Turn execution failed";
+              let errorMsg = (promptErr as Error).message || "Turn execution failed";
+              if (/trajectory.*not found/i.test(errorMsg)) {
+                errorMsg = "Antigravity session trajectory has expired upstream. Start a new conversation to continue.";
+              }
               if (
                 session.isCancelled ||
                 errorMsg.includes("cancelled") ||

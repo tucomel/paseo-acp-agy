@@ -17,9 +17,13 @@ export default function contribute(server: PluginServerContext) {
   let disposeUsageSource: (() => void) | void;
   if (typeof maybeRegisterUsage === "function") {
     try {
-      disposeUsageSource = maybeRegisterUsage.call(server, createAntigravityUsageSource());
+      disposeUsageSource = maybeRegisterUsage.call(server, createAntigravityUsageSource("antigravity"));
     } catch (err) {
-      console.warn("[antigravity-telemetry] Could not register usage source:", err);
+      try {
+        disposeUsageSource = maybeRegisterUsage.call(server, createAntigravityUsageSource("antigravity-acp"));
+      } catch (fallbackErr) {
+        console.warn("[antigravity-telemetry] Could not register usage source:", err);
+      }
     }
   }
 

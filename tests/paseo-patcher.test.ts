@@ -746,4 +746,36 @@ export class ACPAgentSession {
       delete process.env.PASEO_ASAR_PATH;
     }
   });
+
+  it("should patch PR #8719 Paseo 0.11+ architecture cleanly without duplicate usage source error", () => {
+    const pluginDir = path.join(tempDir, "dist", "server", "builtin-plugins", "antigravity-provider");
+    const internalDir = path.join(pluginDir, "server", "internal");
+    fs.mkdirSync(internalDir, { recursive: true });
+
+    const indexFile = path.join(pluginDir, "index.server.ts");
+    fs.writeFileSync(
+      indexFile,
+      `export default function contribute(server) {\n  const usage = new Usage();\n  server.registerUsageSource(usage.registration());\n  return () => {};\n}\n`,
+      "utf-8"
+    );
+
+    const internalUsageFile = path.join(internalDir, "usage.ts");
+    fs.writeFileSync(
+      internalUsageFile,
+      `export class Usage {\n  registration() {\n    return {\n      discover: async (scope) => {\n        return [...this.launches.keys()].map((account) => ({ key: account, label: "Antigravity", input: { account } }));\n      },\n      fetch: async (rawInput) => {\n        const launch = this.launches.get(account);\n        if (!launch) throw new Error("Antigravity login store no longer exists");\n        return this.fetchAccountUsage(account, launch);\n      },\n    };\n  }\n}\n`,
+      "utf-8"
+    );
+
+    const res = patchPaseoServer(tempDir);
+    expect(res.success).toBe(true);
+    expect(isPaseoServerPatched(tempDir)).toBe(true);
+
+    const patchedInternal = fs.readFileSync(internalUsageFile, "utf-8");
+    expect(patchedInternal).toContain("if (accounts.length === 0)");
+    expect(patchedInternal).toContain("return [{ key: defaultAccount");
+    expect(patchedInternal).toContain("if (!launch) {");
+
+    const patchedIndex = fs.readFileSync(indexFile, "utf-8");
+    expect(patchedIndex).not.toContain("registerAntigravityUsageSource(server)");
+  });
 });
